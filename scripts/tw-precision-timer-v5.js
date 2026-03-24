@@ -524,13 +524,22 @@
     parseIncomingCommands: function() {
       var commands = [];
 
-      // Find the incomings table — look for table with command rows containing info_command links
+      // Find the incomings data table — look for the innermost table with "Príkaz"/"Command" header
       var $table = null;
       $('table').each(function() {
         var $t = $(this);
-        if ($t.find('a[href*="info_command"]').length > 0) {
+        var $ths = $t.find('th');
+        var hasCommandHeader = false;
+        $ths.each(function() {
+          var text = $(this).text().trim().toLowerCase();
+          if (text.indexOf('príkaz') !== -1 || text.indexOf('command') !== -1 || text.indexOf('befehl') !== -1) {
+            hasCommandHeader = true;
+            return false;
+          }
+        });
+        // Must have command header AND be a small table (not a wrapper)
+        if (hasCommandHeader && $t.find('> tbody > tr, > tr').length <= 20 && $t.find('a[href*="info_command"]').length > 0) {
           $table = $t;
-          return false;
         }
       });
 
