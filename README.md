@@ -9,109 +9,89 @@ Calculates exact send times for defensive sniping — ensuring your troops retur
 
 ## Features
 
+### Auto-Detection of Incoming Attacks
+- Parses the **Incomings (Prichod) overview page** automatically
+- Extracts arrival times **with milliseconds** directly from DOM
+- Multi-market support: SK, CZ, EN, DE, PL (date words: dnes/zajtra/today/tomorrow/heute/morgen...)
+- **Unit speed heuristic** auto-classifies commands as cleaner vs noble based on travel time gaps
+- Click any type cell to manually override classification
+- Groups attacks into trains: same player + same target + within 30s
+
 ### Tab 1: Timer
-- **Train selector** — auto-parses incoming attacks from DOM or manual entry
-- **Train breakdown** — shows each command (cleaner, noble, scout) with editable ms values
-- **Gap selection** — click between any two commands to set your return target
-- **Safe window** — visual bar showing the ms window with width badge (green/yellow/red)
+- **Train selector** — auto-parsed incoming attacks + manual entry
+- **Train breakdown** — each command with arrival ms, source village, distance
+- **Gap selection** — click between commands to set return target
+- **Safe window** — visual bar showing ms window with width badge
 - **3 snipe modes**:
-  - **Mode A** — Round-trip attack on barbarian village (send + auto-return)
-  - **Mode B** — Support snipe with recall (send + recall + return, with retry table)
-  - **Mode C** — One-way support (troops stay at target)
-- **Live countdown** — real-time countdown to send time with color transitions
-- **MS Precision Bar** — canvas-based 60fps needle showing current ms (0-999) with safe window overlay
+  - **Mode A** — Round-trip to barbarian village
+  - **Mode B** — Support + recall with retry table
+  - **Mode C** — One-way support
+- **Live countdown** with color transitions
+- **MS Precision Bar** — canvas 60fps needle (0-999ms) with safe window overlay
 
 ### Tab 2: Coordination
-- **Village scanner** — detects your villages from game data
-- **Barbarian finder** — fetches all barb villages from `/map/village.txt` (4,600+ on sk102)
+- **Barbarian finder** — fetches barb villages from `/map/village.txt`
 - **Incoming trains matrix** — grouped by target village
-- **Snipe sources** — for each train, shows all your villages that can snipe it with send times
-- **Unified send schedule** — chronological list of all sends with "Open in Timer" navigation
+- **Snipe sources** — all your villages that can snipe, with send times
+- **Unified send schedule** — chronological list with "Open in Timer" navigation
 
 ### Universal
-- Auto-detects world speed and unit speed from `/interface.php` APIs
-- Works on **any Tribal Wars market/server** (SK, CZ, EN, DE, PL, etc.)
-- Dark theme matching TW aesthetic
-- Draggable modal window
-- localStorage caching with TTL
+- Auto-detects world speed from `/interface.php` APIs
+- Works on **any Tribal Wars market/server**
+- Dark theme, draggable modal, localStorage caching
 
 ## Installation
 
-### Quickbar (recommended)
-1. Open Tribal Wars game
-2. Go to **Settings** > **Edit Quickbar** > **Add New Link**
-3. Paste this as the **Target URL** (Cieľová URL):
+### Quickbar (recommended, requires Premium)
+1. Go to **Settings** > **Edit Quickbar** > **Add New Link**
+2. Paste this as the **Target URL**:
 ```
 javascript:$.getScript('https://1dead12.github.io/TW-train-catcher/scripts/tw-precision-timer-v5.min.js');void 0;
 ```
-4. Save and click the quickbar button on any game page
+3. Save and click the quickbar button on the **Incomings** page
 
-This uses `$.getScript()` via GitHub Pages — the same pattern used by all other TW quickbar scripts. Always loads the latest version.
+> **Note:** Uses GitHub Pages (`*.github.io`) which serves proper CORS headers. `raw.githubusercontent.com` does NOT work with `$.getScript()`.
 
-> **Note:** `raw.githubusercontent.com` URLs do NOT work with `$.getScript()` (blocked by CSP). GitHub Pages (`*.github.io`) works because it serves proper CORS headers.
+### Bookmarklet (no Premium needed)
+1. Create a browser bookmark with the same URL as above
+2. Click the bookmark while on a TW game page
 
-### Bookmarklet (alternative, no Premium needed)
-1. Create a new browser bookmark
-2. Paste the remote loader URL (from above) as the bookmark URL
-4. Click the bookmark while on a TW game page
+## Building from Source
+
+```bash
+npm install
+npm run build     # minify + generate quickbar version
+npm test          # run all tests
+```
+
+| Script | Description |
+|--------|-------------|
+| `npm run build` | Minify source + generate quickbar wrapper |
+| `npm run minify` | Generate `.min.js` only |
+| `npm run quickbar` | Wrap minified into `javascript:void(...)` |
+| `npm test` | Run all Playwright tests |
+| `npm run test:unit` | Run 33 inline unit tests |
+| `npm run test:e2e` | Run live game integration tests |
 
 ## Rules Compliance
 
 This script is a **read-only calculator**. It:
-- NEVER submits any form (no attacking, supporting, or recalling)
-- NEVER auto-executes (user must click to activate)
-- NEVER monitors incoming attacks in background
-- NEVER sends data to external servers
+- NEVER submits any form
+- NEVER auto-executes
+- NEVER monitors attacks in background
+- NEVER sends data externally
 - NEVER modifies game state
-- NEVER emulates premium features
-
-## Files
-
-| File | Size | Description |
-|------|------|-------------|
-| `scripts/tw-precision-timer-v5.js` | 75KB | Full source with 29 inline unit tests |
-| `scripts/tw-precision-timer-v5.min.js` | 35KB | Minified production build |
-| `scripts/tw-precision-timer-v5.quickbar.js` | 35KB | Ready-to-paste quickbar `javascript:` URL |
-| `scripts/tw-precision-timer-v5-test.html` | 4KB | Browser test harness |
-| `tests/e2e/tw-precision-timer.spec.js` | 10KB | 12 Playwright E2E tests |
-
-## Testing
-
-### Unit Tests (29 tests)
-```bash
-npm install
-npx playwright test --grep "inline tests"
-```
-
-### Live Game Tests (requires login)
-```bash
-npx playwright test --grep "Live Game"
-```
-
-### Test Harness (browser)
-Open `scripts/tw-precision-timer-v5-test.html` in a browser to run all unit tests visually.
 
 ## Game Mechanics
 
-Based on the core TW timing rule: **milliseconds of send = milliseconds of return** (deterministic).
+Core rule: **milliseconds of send = milliseconds of return** (deterministic).
 
 - Mode A: `sendTime = targetReturn - (travelTime * 2)`
 - Mode B: `sendTime = targetReturn - (2 * Y)`, `recallTime = targetReturn - Y`
 - Mode C: `sendTime = targetArrival - travelTime`
 - Safe window: `{min: lastCleanerMs + 1, max: firstNobleMs - 1}`
 
-See `docs/plans/2026-03-23-tw-precision-timer-v5-design.md` for the full design document.
-
-## World Config (sk102 example)
-
-| Setting | Value |
-|---------|-------|
-| World speed | 1.2x |
-| Unit speed | 0.825 |
-| Ram speed | 30 min/field (base) |
-| Noble speed | 35 min/field (base) |
-
-The script auto-fetches these values for any world.
+See [design document](docs/plans/2026-03-23-tw-precision-timer-v5-design.md) for full mechanics.
 
 ## License
 
