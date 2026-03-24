@@ -675,11 +675,10 @@
       // Sort commands by arrival time
       train.commands.sort(function(a, b) { return a.arrivalMs - b.arrivalMs; });
 
-      // If only one command, classify as unknown (user decides)
+      // If only one command, can't classify by speed comparison — leave as UNKNOWN
       if (train.commands.length === 1) {
         if (train.commands[0].type === CMD_TYPE.UNKNOWN) {
-          train.commands[0].type = CMD_TYPE.CLEANER;
-          train.commands[0].autoClassified = true;
+          train.commands[0].detectedUnit = 'single attack — classify manually';
         }
         return;
       }
@@ -703,9 +702,10 @@
         var gap = cmd.arrivalMs - firstArrival;
 
         if (idx === 0) {
-          // First command — likely the fastest unit (cleaner: ram, axe, light, etc.)
+          // First command — arrives earliest, likely the fastest unit (cleaner)
           cmd.type = CMD_TYPE.CLEANER;
           cmd.autoClassified = true;
+          cmd.detectedUnit = 'earliest arrival → cleaner';
           return;
         }
 
@@ -723,10 +723,12 @@
           cmd.autoClassified = true;
           cmd.detectedUnit = 'snob (vs light)';
         } else if (gap < 60000) {
-          // Very small gap (<60s) — likely same unit type as first command (another cleaner or wave)
-          cmd.type = CMD_TYPE.CLEANER;
+          // Very small gap (<60s) — same unit speed as first command
+          // Could be: another ram wave, OR a noble sent 26s later with same army
+          // Default to UNKNOWN so user classifies — small gap is ambiguous
+          cmd.type = CMD_TYPE.UNKNOWN;
           cmd.autoClassified = true;
-          cmd.detectedUnit = 'same speed as first';
+          cmd.detectedUnit = 'gap ' + Math.round(gap/1000) + 's — same speed or close send time. Classify manually.';
         } else {
           // Gap doesn't match any known pattern — mark as unknown
           cmd.type = CMD_TYPE.UNKNOWN;
@@ -1155,8 +1157,11 @@
           var selected = train.id === State.selectedTrainId ? ' selected' : '';
           var target = train.targetCoords ? formatCoords(train.targetCoords) : '?';
           var targetName = train.commands[0] && train.commands[0].targetName ? train.commands[0].targetName + ' ' : '';
+          var unknownCount = train.commands.filter(function(c) { return c.type === CMD_TYPE.UNKNOWN; }).length;
           var typeLabel = train.isSupport ? 'SUPPORT' :
-            (train.nobleCount > 0 ? train.nobleCount + ' noble(s)' : train.commands.length + ' cmd(s)');
+            (train.nobleCount > 0 ? train.nobleCount + ' noble(s)' :
+             unknownCount > 0 ? unknownCount + ' UNCLASSIFIED' :
+             train.commands.length + ' cmd(s)');
           var arrStart = train.arrivalStart > 86400000 ?
             'tmrw ' + formatTime(train.arrivalStart - 86400000) : formatTime(train.arrivalStart);
           var arrEnd = train.arrivalEnd > 86400000 ?
