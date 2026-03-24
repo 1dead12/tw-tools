@@ -37,17 +37,25 @@ Calculates exact send times for defensive sniping — ensuring your troops retur
 
 ## Installation
 
-### Quickbar (recommended)
+### Quickbar — Remote Loader (recommended)
 1. Open Tribal Wars game
 2. Go to **Settings** > **Edit Quickbar** > **Add New Link**
-3. Copy the contents of `scripts/tw-precision-timer-v5.quickbar.js`
-4. Paste as the **Target URL**
-5. Click the quickbar button on any game page
+3. Paste this as the **Target URL**:
+```
+javascript:fetch('https://raw.githubusercontent.com/1dead12/TW-train-catcher/main/scripts/tw-precision-timer-v5.min.js').then(r=>r.text()).then(c=>eval(c));void 0;
+```
+4. Save and click the quickbar button on any game page
+
+This loads the latest version from GitHub every time. Always up to date.
+
+### Quickbar — Offline (no internet dependency)
+1. Copy the entire contents of `scripts/tw-precision-timer-v5.quickbar.js`
+2. Paste as the **Target URL** in quickbar settings
+3. This embeds the full 35KB script directly — works offline but won't auto-update
 
 ### Bookmarklet
 1. Create a new browser bookmark
-2. Copy the contents of `scripts/tw-precision-timer-v5.quickbar.js`
-3. Paste as the bookmark URL
+2. Paste the remote loader URL (from above) as the bookmark URL
 4. Click the bookmark while on a TW game page
 
 ## Rules Compliance
