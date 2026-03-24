@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>TWPT v5 Test Harness</title>
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <style>
+    body { background: #1a1a2e; color: #e0c882; font-family: monospace; padding: 20px; }
+    .pass { color: #4caf50; } .fail { color: #f44336; }
+    h1 { font-size: 18px; letter-spacing: 2px; }
+    #test-results { white-space: pre-wrap; line-height: 1.6; }
+    #summary { font-size: 16px; margin-top: 16px; padding: 8px; border-top: 1px solid #e0c882; }
+    #serverTime { display: none; }
+  </style>
+</head>
+<body>
+  <h1>TW PRECISION TIMER v5 — TEST HARNESS</h1>
+  <span id="serverTime">12:00:00</span>
+  <div id="contentContainer"><div id="content_value"></div></div>
+  <div id="test-results"></div>
+  <div id="summary"></div>
+
+  <script>
+    // Mock TW game environment
+    window.game_data = {
+      player: { id: 12345, name: 'TestPlayer', sitter: 0, points: 100000 },
+      village: { id: 1001, x: 543, y: 571, name: '001 so it began' },
+      screen: 'overview_villages',
+      mode: 'incomings',
+      world: 'sk102',
+      market: 'sk',
+      link_base_pure: '/game.php?village=1001&',
+      units: ['spear','sword','axe','archer','spy','light','heavy','ram','catapult','knight','snob'],
+      features: { Premium: true }
+    };
+    window.TribalWars = {
+      buildURL: function(base, params) {
+        var q = Object.keys(params).map(function(k){ return k+'='+params[k]; }).join('&');
+        return '/game.php?' + q;
+      }
+    };
+    window.Dialog = {
+      show: function(title, html) { document.getElementById('content_value').innerHTML = '<h3>'+title+'</h3>'+html; }
+    };
+    window.UI = {
+      ErrorMessage: function(msg) { console.warn('TW UI Error: ' + msg); },
+      SuccessMessage: function(msg) { console.log('TW UI Success: ' + msg); }
+    };
+  </script>
+
+  <script>
+    // Test runner
+    window.TWPT_TESTS = [];
+    window.test = function(name, fn) { TWPT_TESTS.push({name: name, fn: fn}); };
+    window.assertEqual = function(actual, expected, msg) {
+      if (actual !== expected) throw new Error((msg ? msg + ': ' : '') + 'Expected ' + JSON.stringify(expected) + ' got ' + JSON.stringify(actual));
+    };
+    window.assertClose = function(actual, expected, tolerance, msg) {
+      if (Math.abs(actual - expected) > tolerance) throw new Error((msg ? msg + ': ' : '') + 'Expected ~' + expected + ' (±' + tolerance + ') got ' + actual);
+    };
+    window.assertTrue = function(val, msg) {
+      if (!val) throw new Error((msg ? msg + ': ' : '') + 'Expected truthy, got ' + val);
+    };
+    window.assertFalse = function(val, msg) {
+      if (val) throw new Error((msg ? msg + ': ' : '') + 'Expected falsy, got ' + val);
+    };
+    window.runTests = function() {
+      var el = document.getElementById('test-results');
+      var sum = document.getElementById('summary');
+      var pass = 0, fail = 0;
+      TWPT_TESTS.forEach(function(t) {
+        try { t.fn(); pass++; el.innerHTML += '<span class="pass">PASS</span> ' + t.name + '\n'; }
+        catch(e) { fail++; el.innerHTML += '<span class="fail">FAIL</span> ' + t.name + ': ' + e.message + '\n'; }
+      });
+      var color = fail === 0 ? '#4caf50' : '#f44336';
+      sum.innerHTML = '<span style="color:' + color + '">' + pass + ' passed, ' + fail + ' failed out of ' + (pass+fail) + ' tests</span>';
+    };
+  </script>
+
+  <!-- Main script -->
+  <script src="tw-precision-timer-v5.js"></script>
+
+  <!-- Run tests after script loads -->
+  <script>setTimeout(runTests, 100);</script>
+</body>
+</html>
