@@ -464,120 +464,339 @@
   // ============================================================
   // DOM PARSER
   // ============================================================
-  var Parser = {
-    parseIncomingCommands: function() {
-      var commands = [];
-      var $rows = $('#commands_incomings tr, .commands-container tr').not(':first');
 
-      if ($rows.length === 0) {
-        $rows = $('table.vis tr').filter(function() {
-          return $(this).find('img[src*="command"], .command-icon').length > 0;
-        });
+  // Multi-market date word lookup for arrival time parsing
+  var DATE_WORDS_TODAY = ['dnes','today','heute','dzisiaj','vandaag','idag','dnes','bugün','oggi','aujourd','hoy','сегодня','danes'];
+  var DATE_WORDS_TOMORROW = ['zajtra','tomorrow','morgen','jutro','zítra','yarın','domani','demain','mañana','завтра','jutri'];
+
+  // Train grouping window (configurable, default 30s)
+  var TRAIN_GROUP_WINDOW_MS = 30000;
+
+  var Parser = {
+    /**
+     * Check if we're on the incomings overview page
+     */
+    isOnIncomingsPage: function() {
+      if (typeof game_data === 'undefined') return false;
+      return game_data.screen === 'overview_villages' &&
+        (game_data.mode === 'incomings' ||
+         window.location.href.indexOf('mode=incomings') !== -1);
+    },
+
+    /**
+     * Parse arrival time string with date awareness.
+     * Handles: "dnes 21:19:34:431", "zajtra 08:56:08:000", "21:19:34:431"
+     * Returns ms since midnight (adds 86400000 for tomorrow)
+     */
+    parseArrivalTime: function(text) {
+      text = (text || '').trim().toLowerCase();
+      var isTomorrow = false;
+
+      // Check for date words
+      for (var i = 0; i < DATE_WORDS_TOMORROW.length; i++) {
+        if (text.indexOf(DATE_WORDS_TOMORROW[i]) !== -1) { isTomorrow = true; break; }
       }
 
-      $rows.each(function() {
+      // Extract HH:MM:SS:mmm
+      var match = text.match(/(\d{1,2}):(\d{2}):(\d{2}):(\d{3})/);
+      if (!match) {
+        // Try without ms
+        match = text.match(/(\d{1,2}):(\d{2}):(\d{2})/);
+        if (!match) return null;
+      }
+
+      var h = parseInt(match[1], 10);
+      var m = parseInt(match[2], 10);
+      var s = parseInt(match[3], 10);
+      var ms = match[4] ? parseInt(match[4], 10) : 0;
+
+      var timeMs = ((h * 3600) + (m * 60) + s) * 1000 + ms;
+      if (isTomorrow) timeMs += 86400000;
+
+      return timeMs;
+    },
+
+    /**
+     * Parse incoming commands from the incomings overview page.
+     * Reads the table with columns: Príkaz, Cieľ, Pôvod, Hráč, Vzdialenosť, Čas príchodu, Príde o
+     * Returns array of parsed commands with ms precision.
+     */
+    parseIncomingCommands: function() {
+      var commands = [];
+
+      // Find the incomings table — look for table with command rows containing info_command links
+      var $table = null;
+      $('table').each(function() {
+        var $t = $(this);
+        if ($t.find('a[href*="info_command"]').length > 0) {
+          $table = $t;
+          return false;
+        }
+      });
+
+      if (!$table) return commands;
+
+      // Get header row to identify column indices
+      var colMap = {};
+      $table.find('th').each(function(idx) {
+        var text = $(this).text().trim().toLowerCase();
+        // Map column headers (multi-language support)
+        if (text.indexOf('príkaz') !== -1 || text.indexOf('command') !== -1 || text.indexOf('befehl') !== -1) colMap.command = idx;
+        else if (text.indexOf('cieľ') !== -1 || text.indexOf('target') !== -1 || text.indexOf('ziel') !== -1) colMap.target = idx;
+        else if (text.indexOf('pôvod') !== -1 || text.indexOf('origin') !== -1 || text.indexOf('herkunft') !== -1) colMap.origin = idx;
+        else if (text.indexOf('hráč') !== -1 || text.indexOf('player') !== -1 || text.indexOf('spieler') !== -1) colMap.player = idx;
+        else if (text.indexOf('vzdialenosť') !== -1 || text.indexOf('distance') !== -1 || text.indexOf('entfernung') !== -1) colMap.distance = idx;
+        else if (text.indexOf('čas príchodu') !== -1 || text.indexOf('arrival') !== -1 || text.indexOf('ankunft') !== -1) colMap.arrival = idx;
+      });
+
+      // Fallback column positions if headers not found
+      if (colMap.command === undefined) colMap.command = 0;
+      if (colMap.target === undefined) colMap.target = 1;
+      if (colMap.origin === undefined) colMap.origin = 2;
+      if (colMap.player === undefined) colMap.player = 3;
+      if (colMap.distance === undefined) colMap.distance = 4;
+      if (colMap.arrival === undefined) colMap.arrival = 5;
+
+      // Parse data rows (skip header and footer rows)
+      $table.find('tbody tr, tr').each(function() {
         var $row = $(this);
+        var $cells = $row.find('td');
+
+        // Skip header rows (th), footer rows, rows without enough cells
+        if ($cells.length < 6) return;
+
+        // Skip if no command link
+        var $cmdLink = $cells.eq(colMap.command).find('a[href*="info_command"]');
+        if ($cmdLink.length === 0) return;
+
         var cmd = {};
 
-        var $icon = $row.find('img[src*="command"], .command-icon img').first();
-        if ($icon.length) {
-          var src = ($icon.attr('src') || '').toLowerCase();
-          if (src.indexOf('snob') !== -1 || src.indexOf('noble') !== -1) {
-            cmd.type = CMD_TYPE.NOBLE;
-          } else if (src.indexOf('ram') !== -1) {
-            cmd.type = CMD_TYPE.CLEANER;
-          } else if (src.indexOf('axe') !== -1 || src.indexOf('sword') !== -1 || src.indexOf('spear') !== -1) {
-            cmd.type = CMD_TYPE.CLEANER;
-          } else if (src.indexOf('spy') !== -1 || src.indexOf('scout') !== -1) {
-            cmd.type = CMD_TYPE.SCOUT;
-          } else if (src.indexOf('support') !== -1 || src.indexOf('def') !== -1) {
-            cmd.type = CMD_TYPE.SUPPORT;
-          } else {
-            cmd.type = CMD_TYPE.UNKNOWN;
-          }
+        // Command type from link text and icon
+        var cmdText = $cmdLink.text().trim().toLowerCase();
+        var $icon = $cells.eq(colMap.command).find('img').first();
+        var iconSrc = ($icon.attr('src') || '').toLowerCase();
+
+        // Classify by icon src first (most reliable)
+        if (iconSrc.indexOf('snob') !== -1 || iconSrc.indexOf('noble') !== -1) {
+          cmd.type = CMD_TYPE.NOBLE;
+        } else if (iconSrc.indexOf('support') !== -1 || iconSrc.indexOf('def') !== -1) {
+          cmd.type = CMD_TYPE.SUPPORT;
+        } else if (iconSrc.indexOf('attack') !== -1 || iconSrc.indexOf('att') !== -1) {
+          // Generic attack — could be ram, axe, noble. Will classify by speed later.
+          cmd.type = CMD_TYPE.UNKNOWN;
         } else {
           cmd.type = CMD_TYPE.UNKNOWN;
         }
 
-        var $playerLink = $row.find('a[href*="info_player"]');
+        // Also check by text for support detection (multi-language)
+        if (cmdText.indexOf('posil') !== -1 || cmdText.indexOf('support') !== -1 ||
+            cmdText.indexOf('unterstützung') !== -1 || cmdText.indexOf('wsparcie') !== -1) {
+          cmd.type = CMD_TYPE.SUPPORT;
+        }
+
+        // Command ID from link href
+        var cmdHref = $cmdLink.attr('href') || '';
+        var idMatch = cmdHref.match(/id=(\d+)/);
+        if (idMatch) cmd.commandId = parseInt(idMatch[1], 10);
+
+        // Target village (Cieľ column)
+        var targetText = $cells.eq(colMap.target).text().trim();
+        cmd.targetCoords = parseCoords(targetText);
+        cmd.targetName = targetText.replace(/\s*\(\d+\|\d+\)\s*K\d+\s*$/, '').trim();
+
+        // Source/origin village (Pôvod column)
+        var originText = $cells.eq(colMap.origin).text().trim();
+        cmd.sourceCoords = parseCoords(originText);
+        cmd.sourceName = originText.replace(/\s*\(\d+\|\d+\)\s*K\d+\s*$/, '').trim();
+
+        // Player name (Hráč column)
+        var $playerLink = $cells.eq(colMap.player).find('a[href*="info_player"]');
         cmd.attacker = $playerLink.text().trim() || 'Unknown';
 
-        var $coordLinks = $row.find('a[href*="info_village"], span.village_anchor');
-        if ($coordLinks.length >= 1) {
-          cmd.sourceCoords = parseCoords($coordLinks.eq(0).text());
-        }
-        if ($coordLinks.length >= 2) {
-          cmd.targetCoords = parseCoords($coordLinks.eq(1).text());
-        } else if (typeof game_data !== 'undefined') {
-          cmd.targetCoords = { x: game_data.village.x, y: game_data.village.y };
+        // Distance (Vzdialenosť column)
+        var distText = $cells.eq(colMap.distance).text().trim().replace(',', '.');
+        cmd.distance = parseFloat(distText) || 0;
+
+        // Arrival time with ms (Čas príchodu column) — e.g. "dnes 21:19:34:431"
+        var arrivalText = $cells.eq(colMap.arrival).text().trim();
+        var arrivalMs = Parser.parseArrivalTime(arrivalText);
+        if (arrivalMs !== null) {
+          cmd.arrivalMs = arrivalMs;
+          cmd.arrivalSec = Math.floor(arrivalMs / 1000) * 1000; // floored to second
+          cmd.ms = arrivalMs % 1000;
+          cmd.timeMs = arrivalMs; // full arrival time with ms
         }
 
-        var timeText = $row.text();
-        var timeMatch = timeText.match(/(\d{1,2}):(\d{2}):(\d{2})\s*$/m) ||
-                        timeText.match(/(\d{1,2}):(\d{2}):(\d{2})/);
-        if (timeMatch) {
-          var h = parseInt(timeMatch[1], 10);
-          var m = parseInt(timeMatch[2], 10);
-          var s = parseInt(timeMatch[3], 10);
-          cmd.arrivalSec = ((h * 3600) + (m * 60) + s) * 1000;
-          cmd.ms = 0;
+        // Only add if we have arrival time
+        if (cmd.arrivalMs) {
+          commands.push(cmd);
         }
-
-        var $cmdLink = $row.find('a[href*="command_id"]');
-        if ($cmdLink.length) {
-          var href = $cmdLink.attr('href');
-          var idMatch = href.match(/command_id=(\d+)/);
-          if (idMatch) cmd.commandId = parseInt(idMatch[1], 10);
-        }
-
-        if (cmd.arrivalSec) commands.push(cmd);
       });
 
       return commands;
     },
 
+    /**
+     * Classify commands within a train using unit speed heuristic.
+     * Uses distance + world config to compute expected travel times per unit type,
+     * then matches arrival time gaps against expected differences.
+     */
+    classifyTrainCommands: function(train) {
+      if (!train.commands || train.commands.length === 0) return;
+
+      var ws = DataFetcher.getWorldSpeed();
+      var usf = DataFetcher.getUnitSpeedFactor();
+      var dist = train.commands[0].distance || 0;
+
+      if (dist === 0) {
+        // No distance info — can't classify by speed, mark first as cleaner, rest as unknown
+        train.commands[0].type = CMD_TYPE.CLEANER;
+        train.commands[0].autoClassified = true;
+        return;
+      }
+
+      // Compute expected travel time for key unit types (in ms)
+      var travelTimes = {};
+      var unitTypes = ['spear', 'sword', 'axe', 'light', 'heavy', 'ram', 'catapult', 'snob'];
+      unitTypes.forEach(function(u) {
+        var speed = DataFetcher.getUnitSpeed(u);
+        travelTimes[u] = Calc.travelTime(dist, speed, ws, usf);
+      });
+
+      // Sort commands by arrival time
+      train.commands.sort(function(a, b) { return a.arrivalMs - b.arrivalMs; });
+
+      // If only one command, classify as unknown (user decides)
+      if (train.commands.length === 1) {
+        if (train.commands[0].type === CMD_TYPE.UNKNOWN) {
+          train.commands[0].type = CMD_TYPE.CLEANER;
+          train.commands[0].autoClassified = true;
+        }
+        return;
+      }
+
+      // For multi-command trains, compute gaps relative to first command
+      var firstArrival = train.commands[0].arrivalMs;
+
+      // Expected gap between ram (30 min/field) and noble (35 min/field)
+      var ramNobleGap = travelTimes.snob - travelTimes.ram;
+      // Expected gap between axe (18 min/field) and noble (35 min/field)
+      var axeNobleGap = travelTimes.snob - travelTimes.axe;
+      // Expected gap between light (10 min/field) and noble (35 min/field)
+      var lightNobleGap = travelTimes.snob - travelTimes.light;
+
+      // Tolerance: 5% of the gap or 5 seconds, whichever is larger
+      var tolerance = function(gap) { return Math.max(Math.abs(gap) * 0.05, 5000); };
+
+      train.commands.forEach(function(cmd, idx) {
+        if (cmd.type === CMD_TYPE.SUPPORT) return; // keep support as-is
+
+        var gap = cmd.arrivalMs - firstArrival;
+
+        if (idx === 0) {
+          // First command — likely the fastest unit (cleaner: ram, axe, light, etc.)
+          cmd.type = CMD_TYPE.CLEANER;
+          cmd.autoClassified = true;
+          return;
+        }
+
+        // Check if gap matches noble offset from any cleaner type
+        if (Math.abs(gap - ramNobleGap) < tolerance(ramNobleGap)) {
+          cmd.type = CMD_TYPE.NOBLE;
+          cmd.autoClassified = true;
+          cmd.detectedUnit = 'snob (vs ram)';
+        } else if (Math.abs(gap - axeNobleGap) < tolerance(axeNobleGap)) {
+          cmd.type = CMD_TYPE.NOBLE;
+          cmd.autoClassified = true;
+          cmd.detectedUnit = 'snob (vs axe)';
+        } else if (Math.abs(gap - lightNobleGap) < tolerance(lightNobleGap)) {
+          cmd.type = CMD_TYPE.NOBLE;
+          cmd.autoClassified = true;
+          cmd.detectedUnit = 'snob (vs light)';
+        } else if (gap < 60000) {
+          // Very small gap (<60s) — likely same unit type as first command (another cleaner or wave)
+          cmd.type = CMD_TYPE.CLEANER;
+          cmd.autoClassified = true;
+          cmd.detectedUnit = 'same speed as first';
+        } else {
+          // Gap doesn't match any known pattern — mark as unknown
+          cmd.type = CMD_TYPE.UNKNOWN;
+          cmd.autoClassified = true;
+          cmd.detectedUnit = 'unmatched gap: ' + formatDuration(gap);
+        }
+      });
+    },
+
+    /**
+     * Group commands into trains.
+     * Heuristic: same attacker, same target, arrival within TRAIN_GROUP_WINDOW_MS (30s default).
+     * Then classify each train's commands by unit speed.
+     */
     groupIntoTrains: function(commands) {
       if (!commands.length) return [];
 
-      var sorted = commands.slice().sort(function(a, b) {
-        return a.arrivalSec - b.arrivalSec;
+      // Filter out support commands for train grouping (keep them separate)
+      var attacks = commands.filter(function(c) { return c.type !== CMD_TYPE.SUPPORT; });
+      var supports = commands.filter(function(c) { return c.type === CMD_TYPE.SUPPORT; });
+
+      // Sort attacks by arrival time
+      var sorted = attacks.slice().sort(function(a, b) {
+        return a.arrivalMs - b.arrivalMs;
       });
 
       var trains = [];
-      var currentTrain = {
-        attacker: sorted[0].attacker,
-        targetCoords: sorted[0].targetCoords,
-        commands: [sorted[0]]
-      };
 
-      for (var i = 1; i < sorted.length; i++) {
-        var cmd = sorted[i];
-        var lastCmd = currentTrain.commands[currentTrain.commands.length - 1];
-        var sameAttacker = cmd.attacker === currentTrain.attacker;
-        var sameTarget = cmd.targetCoords && currentTrain.targetCoords &&
-          cmd.targetCoords.x === currentTrain.targetCoords.x &&
-          cmd.targetCoords.y === currentTrain.targetCoords.y;
-        var withinWindow = Math.abs(cmd.arrivalSec - lastCmd.arrivalSec) <= 3000;
+      if (sorted.length > 0) {
+        var currentTrain = {
+          attacker: sorted[0].attacker,
+          targetCoords: sorted[0].targetCoords,
+          commands: [sorted[0]]
+        };
 
-        if (sameAttacker && sameTarget && withinWindow) {
-          currentTrain.commands.push(cmd);
-        } else {
-          trains.push(currentTrain);
-          currentTrain = {
-            attacker: cmd.attacker,
-            targetCoords: cmd.targetCoords,
-            commands: [cmd]
-          };
+        for (var i = 1; i < sorted.length; i++) {
+          var cmd = sorted[i];
+          var lastCmd = currentTrain.commands[currentTrain.commands.length - 1];
+          var sameAttacker = cmd.attacker === currentTrain.attacker;
+          var sameTarget = cmd.targetCoords && currentTrain.targetCoords &&
+            cmd.targetCoords.x === currentTrain.targetCoords.x &&
+            cmd.targetCoords.y === currentTrain.targetCoords.y;
+          var withinWindow = Math.abs(cmd.arrivalMs - lastCmd.arrivalMs) <= TRAIN_GROUP_WINDOW_MS;
+
+          if (sameAttacker && sameTarget && withinWindow) {
+            currentTrain.commands.push(cmd);
+          } else {
+            trains.push(currentTrain);
+            currentTrain = {
+              attacker: cmd.attacker,
+              targetCoords: cmd.targetCoords,
+              commands: [cmd]
+            };
+          }
         }
+        trains.push(currentTrain);
       }
-      trains.push(currentTrain);
 
+      // Add support commands as individual "trains" for visibility
+      supports.forEach(function(s) {
+        trains.push({
+          attacker: s.attacker || 'Support',
+          targetCoords: s.targetCoords,
+          commands: [s]
+        });
+      });
+
+      // Enrich and classify each train
       trains.forEach(function(train, idx) {
         train.id = 'train_' + idx;
-        var times = train.commands.map(function(c) { return c.arrivalSec; });
+        var times = train.commands.map(function(c) { return c.arrivalMs || 0; });
         train.arrivalStart = Math.min.apply(null, times);
         train.arrivalEnd = Math.max.apply(null, times);
+
+        // Auto-classify commands by unit speed
+        Parser.classifyTrainCommands(train);
+
         train.nobleCount = train.commands.filter(function(c) { return c.type === CMD_TYPE.NOBLE; }).length;
+        train.isSupport = train.commands.length === 1 && train.commands[0].type === CMD_TYPE.SUPPORT;
       });
 
       return trains;
@@ -905,21 +1124,38 @@
     _renderTrainSelector: function() {
       var html = '<div class="twpt-section">';
       html += '<div class="twpt-flex-between"><div class="twpt-section-title">Incoming Train</div>';
-      html += '<button class="twpt-btn twpt-btn-sm" id="twpt-add-train">+ Add Train</button></div>';
+      html += '<div class="twpt-flex">';
+      if (!Parser.isOnIncomingsPage()) {
+        html += '<button class="twpt-btn twpt-btn-sm" id="twpt-goto-incomings" style="background:' + COLORS.bgInput + ';color:' + COLORS.text + '">Go to Incomings</button>';
+      } else {
+        html += '<button class="twpt-btn twpt-btn-sm" id="twpt-refresh-trains">Refresh</button>';
+      }
+      html += '<button class="twpt-btn twpt-btn-sm" id="twpt-add-train">+ Add Manual</button>';
+      html += '</div></div>';
 
       if (State.trains.length === 0) {
-        html += '<div class="twpt-info">No trains detected. Open this on the incoming attacks page or add manually.</div>';
+        if (!Parser.isOnIncomingsPage()) {
+          html += '<div class="twpt-warn">Navigate to the <b>Incomings (Príchod)</b> overview page for auto-detection of incoming attacks. Or add trains manually.</div>';
+        } else {
+          html += '<div class="twpt-info">No incoming attacks found on this page.</div>';
+        }
       } else {
         html += '<select class="twpt-select" id="twpt-train-select" style="width:100%;margin-top:8px">';
-        html += '<option value="">-- Select train --</option>';
+        html += '<option value="">-- Select train (' + State.trains.length + ') --</option>';
         State.trains.forEach(function(train) {
           var selected = train.id === State.selectedTrainId ? ' selected' : '';
           var target = train.targetCoords ? formatCoords(train.targetCoords) : '?';
+          var targetName = train.commands[0] && train.commands[0].targetName ? train.commands[0].targetName + ' ' : '';
+          var typeLabel = train.isSupport ? 'SUPPORT' :
+            (train.nobleCount > 0 ? train.nobleCount + ' noble(s)' : train.commands.length + ' cmd(s)');
+          var arrStart = train.arrivalStart > 86400000 ?
+            'tmrw ' + formatTime(train.arrivalStart - 86400000) : formatTime(train.arrivalStart);
+          var arrEnd = train.arrivalEnd > 86400000 ?
+            'tmrw ' + formatTime(train.arrivalEnd - 86400000) : formatTime(train.arrivalEnd);
           html += '<option value="' + train.id + '"' + selected + '>' +
-            train.attacker + ' → ' + target +
-            ' | ' + formatTimeSec(train.arrivalStart) + '-' + formatTimeSec(train.arrivalEnd) +
-            ' | ' + train.nobleCount + ' noble(s)' +
-            ' | ' + train.commands.length + ' cmds</option>';
+            train.attacker + ' → ' + targetName + target +
+            ' | ' + arrStart + (train.commands.length > 1 ? ' - ' + arrEnd : '') +
+            ' | ' + typeLabel + '</option>';
         });
         html += '</select>';
       }
@@ -933,18 +1169,20 @@
       if (!train) return '';
 
       var html = '<div class="twpt-section">';
-      html += '<div class="twpt-section-title">Train Breakdown — click gap to set return target</div>';
+      html += '<div class="twpt-section-title">Train Breakdown — click gap to set return target, click type to change</div>';
       html += '<table class="twpt-table"><thead><tr>' +
-        '<th>#</th><th>Type</th><th>Arrival (s)</th><th>MS</th><th>Player</th>' +
+        '<th>#</th><th>Type</th><th>Arrival</th><th>MS</th><th>Source</th><th>Dist</th>' +
         '</tr></thead><tbody>';
 
       train.commands.forEach(function(cmd, idx) {
         // Gap row BEFORE this command (if not first)
         if (idx > 0) {
           var isSelected = State.selectedGapAfter === (idx - 1) && State.selectedGapBefore === idx;
+          var prevType = train.commands[idx - 1].type === CMD_TYPE.NOBLE ? 'noble' :
+                         train.commands[idx - 1].type === CMD_TYPE.CLEANER ? 'cleaner' : 'cmd';
           html += '<tr class="twpt-row-gap' + (isSelected ? ' selected' : '') +
             '" data-after="' + (idx - 1) + '" data-before="' + idx + '">' +
-            '<td colspan="5">▼ return HERE ▼ (after ' + cmd.type + ' #' + idx + ')</td></tr>';
+            '<td colspan="6">▼ return HERE ▼ (after ' + prevType + ' #' + (idx) + ')</td></tr>';
         }
 
         var typeLabel = cmd.type === CMD_TYPE.NOBLE ? 'NOBLE' :
@@ -952,19 +1190,33 @@
                         cmd.type === CMD_TYPE.SCOUT ? 'SCOUT' :
                         cmd.type === CMD_TYPE.SUPPORT ? 'SUPP' : '???';
         var typeColor = cmd.type === CMD_TYPE.NOBLE ? COLORS.danger :
-                        cmd.type === CMD_TYPE.CLEANER ? COLORS.warning : COLORS.textDim;
+                        cmd.type === CMD_TYPE.CLEANER ? COLORS.warning :
+                        cmd.type === CMD_TYPE.SUPPORT ? COLORS.success : COLORS.textDim;
+        var autoTag = cmd.autoClassified ? ' *' : '';
+        var detectedHint = cmd.detectedUnit ? ' title="' + cmd.detectedUnit + '"' : '';
+
+        // Format arrival with tomorrow indicator
+        var arrivalDisplay = cmd.arrivalMs > 86400000 ?
+          'tmrw ' + formatTime(cmd.arrivalMs - 86400000) : formatTime(cmd.arrivalMs || 0);
+
+        var sourceDisplay = cmd.sourceName ? cmd.sourceName.substring(0, 15) : '';
+        if (cmd.sourceCoords) sourceDisplay += ' (' + formatCoords(cmd.sourceCoords) + ')';
 
         html += '<tr data-idx="' + idx + '">' +
           '<td>' + (idx + 1) + '</td>' +
-          '<td style="color:' + typeColor + '">' + typeLabel + '</td>' +
-          '<td>' + formatTimeSec(cmd.arrivalSec) + '</td>' +
+          '<td style="color:' + typeColor + ';cursor:pointer" class="twpt-toggle-type" data-idx="' + idx + '"' + detectedHint + '>' +
+            typeLabel + autoTag + '</td>' +
+          '<td>' + arrivalDisplay + '</td>' +
           '<td><input class="twpt-input twpt-input-ms twpt-cmd-ms" type="number" min="0" max="999" ' +
             'value="' + (cmd.ms || 0) + '" data-idx="' + idx + '" placeholder="000"></td>' +
-          '<td>' + (cmd.attacker || '') + '</td>' +
+          '<td style="font-size:11px">' + sourceDisplay + '</td>' +
+          '<td>' + (cmd.distance ? cmd.distance.toFixed(1) : '') + '</td>' +
           '</tr>';
       });
 
-      html += '</tbody></table></div>';
+      html += '</tbody></table>';
+      html += '<div style="font-size:10px;color:' + COLORS.textDim + ';margin-top:4px">* = auto-classified by unit speed. Click type to change.</div>';
+      html += '</div>';
       return html;
     },
 
@@ -1214,9 +1466,43 @@
         var train = State.getSelectedTrain();
         if (train && train.commands[idx]) {
           train.commands[idx].ms = Math.max(0, Math.min(999, val));
-          train.commands[idx].timeMs = train.commands[idx].arrivalSec + train.commands[idx].ms;
+          train.commands[idx].timeMs = (train.commands[idx].arrivalSec || 0) + train.commands[idx].ms;
+          train.commands[idx].arrivalMs = train.commands[idx].timeMs;
           State.saveTrains();
         }
+      });
+
+      // Toggle command type (click on type cell to cycle CLEANER → NOBLE → UNKNOWN → CLEANER)
+      $('.twpt-toggle-type').on('click', function() {
+        var idx = parseInt($(this).data('idx'), 10);
+        var train = State.getSelectedTrain();
+        if (train && train.commands[idx]) {
+          var current = train.commands[idx].type;
+          if (current === CMD_TYPE.CLEANER) train.commands[idx].type = CMD_TYPE.NOBLE;
+          else if (current === CMD_TYPE.NOBLE) train.commands[idx].type = CMD_TYPE.UNKNOWN;
+          else train.commands[idx].type = CMD_TYPE.CLEANER;
+          train.commands[idx].autoClassified = false;
+          train.nobleCount = train.commands.filter(function(c) { return c.type === CMD_TYPE.NOBLE; }).length;
+          State.saveTrains();
+          self.renderTimerTab();
+        }
+      });
+
+      // Go to incomings page
+      $('#twpt-goto-incomings').on('click', function() {
+        var villageId = typeof game_data !== 'undefined' ? game_data.village.id : '';
+        window.location.href = '/game.php?village=' + villageId + '&screen=overview_villages&mode=incomings';
+      });
+
+      // Refresh trains from DOM
+      $('#twpt-refresh-trains').on('click', function() {
+        var commands = Parser.parseIncomingCommands();
+        if (commands.length) {
+          State.trains = Parser.groupIntoTrains(commands);
+          State.saveTrains();
+          State.selectedTrainId = null;
+        }
+        self.renderTimerTab();
       });
 
       // Mode toggle
@@ -1597,9 +1883,7 @@
       loaded++;
       if (loaded < 2) return;
 
-      if (typeof game_data !== 'undefined' &&
-          game_data.screen === 'overview_villages' &&
-          game_data.mode === 'incomings') {
+      if (Parser.isOnIncomingsPage()) {
         var commands = Parser.parseIncomingCommands();
         if (commands.length) {
           State.trains = Parser.groupIntoTrains(commands);
@@ -1846,12 +2130,12 @@
     });
 
     // --- PARSER TESTS ---
-    test('Parser.groupIntoTrains: groups by attacker+time', function() {
+    test('Parser.groupIntoTrains: groups by attacker+time (30s window)', function() {
       var commands = [
-        { attacker: 'Fanty', targetCoords: {x:543,y:571}, arrivalSec: 36000000, type: CMD_TYPE.CLEANER },
-        { attacker: 'Fanty', targetCoords: {x:543,y:571}, arrivalSec: 36000500, type: CMD_TYPE.NOBLE },
-        { attacker: 'Fanty', targetCoords: {x:543,y:571}, arrivalSec: 36001000, type: CMD_TYPE.NOBLE },
-        { attacker: 'Kolbas', targetCoords: {x:543,y:571}, arrivalSec: 36005000, type: CMD_TYPE.NOBLE }
+        { attacker: 'Fanty', targetCoords: {x:543,y:571}, arrivalMs: 36000000, type: CMD_TYPE.CLEANER, distance: 10 },
+        { attacker: 'Fanty', targetCoords: {x:543,y:571}, arrivalMs: 36000500, type: CMD_TYPE.UNKNOWN, distance: 10 },
+        { attacker: 'Fanty', targetCoords: {x:543,y:571}, arrivalMs: 36001000, type: CMD_TYPE.UNKNOWN, distance: 10 },
+        { attacker: 'Kolbas', targetCoords: {x:543,y:571}, arrivalMs: 36060000, type: CMD_TYPE.UNKNOWN, distance: 10 }
       ];
       var trains = Parser.groupIntoTrains(commands);
       assertEqual(trains.length, 2);
@@ -1860,13 +2144,33 @@
       assertEqual(trains[1].attacker, 'Kolbas');
     });
 
-    test('Parser.groupIntoTrains: splits on >3s gap', function() {
+    test('Parser.groupIntoTrains: splits on >30s gap', function() {
       var commands = [
-        { attacker: 'Fanty', targetCoords: {x:543,y:571}, arrivalSec: 36000000, type: CMD_TYPE.CLEANER },
-        { attacker: 'Fanty', targetCoords: {x:543,y:571}, arrivalSec: 36004000, type: CMD_TYPE.NOBLE }
+        { attacker: 'Fanty', targetCoords: {x:543,y:571}, arrivalMs: 36000000, type: CMD_TYPE.CLEANER, distance: 10 },
+        { attacker: 'Fanty', targetCoords: {x:543,y:571}, arrivalMs: 36031000, type: CMD_TYPE.UNKNOWN, distance: 10 }
       ];
       var trains = Parser.groupIntoTrains(commands);
       assertEqual(trains.length, 2);
+    });
+
+    test('Parser.parseArrivalTime: today with ms', function() {
+      var result = Parser.parseArrivalTime('dnes 21:19:34:431');
+      assertEqual(result, ((21*3600)+(19*60)+34)*1000 + 431);
+    });
+
+    test('Parser.parseArrivalTime: tomorrow with ms', function() {
+      var result = Parser.parseArrivalTime('zajtra 08:56:08:000');
+      assertEqual(result, 86400000 + ((8*3600)+(56*60)+8)*1000);
+    });
+
+    test('Parser.parseArrivalTime: english today', function() {
+      var result = Parser.parseArrivalTime('today 10:00:00:500');
+      assertEqual(result, ((10*3600)+0+0)*1000 + 500);
+    });
+
+    test('Parser.parseArrivalTime: english tomorrow', function() {
+      var result = Parser.parseArrivalTime('tomorrow 08:00:00:000');
+      assertEqual(result, 86400000 + ((8*3600)+0+0)*1000);
     });
 
     test('DataFetcher.findNearestBarbs: sorts by distance', function() {
