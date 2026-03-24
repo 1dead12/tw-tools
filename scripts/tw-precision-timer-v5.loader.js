@@ -1,1 +1,1 @@
-javascript:void(fetch('https://raw.githubusercontent.com/1dead12/TW-train-catcher/main/scripts/tw-precision-timer-v5.min.js').then(function(r){return r.text()}).then(function(c){eval(c)}))
+javascript:$.getScript('https://1dead12.github.io/TW-train-catcher/scripts/tw-precision-timer-v5.min.js');void 0;
