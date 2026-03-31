@@ -169,9 +169,9 @@
      */
     isOnMassScavengePage: function() {
       if (typeof game_data === 'undefined') return false;
+      // game_data.mode can be null even on scavenge_mass page — check URL instead
       return game_data.screen === 'place' &&
-        (game_data.mode === 'scavenge_mass' ||
-         window.location.href.indexOf('mode=scavenge_mass') !== -1);
+        window.location.href.indexOf('mode=scavenge_mass') !== -1;
     },
 
     /**
@@ -180,28 +180,28 @@
      * @returns {Array.<{id: string, name: string}>} Village groups.
      */
     readGroups: function() {
-      var groups = [];
+      var groups = [{ id: '0', name: 'All villages' }];
 
-      // Try the standard group selector on the page
+      // Method 1: Parse group links from mass scavenge page
+      // Groups are <a> links like [Plny utok] with href containing scavenge_mass&group=NNNN
+      $('a[href*="scavenge_mass"]').each(function() {
+        var $a = $(this);
+        var href = $a.attr('href') || '';
+        var match = href.match(/group=(\d+)/);
+        if (match) {
+          groups.push({
+            id: match[1],
+            name: $a.text().trim().replace(/^\[|\]$/g, '') // Remove brackets
+          });
+        }
+      });
+      if (groups.length > 1) return groups;
+
+      // Method 2: Try the standard group selector dropdown
       var $select = $('#group_id');
       if ($select.length === 0) {
         $select = $('select[name="group_id"]');
       }
-      if ($select.length === 0) {
-        // Try group menu links
-        $('#group_table a[data-group-id], .group-menu-item a').each(function() {
-          var $a = $(this);
-          var gid = $a.data('group-id') || $a.attr('data-group-id');
-          if (gid !== undefined) {
-            groups.push({
-              id: String(gid),
-              name: $a.text().trim()
-            });
-          }
-        });
-        if (groups.length > 0) return groups;
-      }
-
       if ($select.length > 0) {
         $select.find('option').each(function() {
           groups.push({
@@ -210,11 +210,19 @@
           });
         });
       }
+      if (groups.length > 1) return groups;
 
-      // Fallback: at least the "All" group
-      if (groups.length === 0) {
-        groups.push({ id: '0', name: 'All villages' });
-      }
+      // Method 3: Try group menu links with data attributes
+      $('#group_table a[data-group-id], .group-menu-item a').each(function() {
+        var $a = $(this);
+        var gid = $a.data('group-id') || $a.attr('data-group-id');
+        if (gid !== undefined) {
+          groups.push({
+            id: String(gid),
+            name: $a.text().trim()
+          });
+        }
+      });
 
       return groups;
     },
@@ -269,20 +277,65 @@
     parseVillageRows: function(groupId) {
       var villages = [];
 
-      // On mass scavenge page, parse the table rows
-      var $rows = $('.scavenge_mass_screen .candidate-squad-widget, ' +
-                    'table.vis tbody tr, ' +
-                    '.scavenge-option');
+      // Method 1: Find village rows by links to individual scavenge pages
+      // Each village row has an <a> with href containing screen=place&mode=scavenge (NOT scavenge_mass)
+      $('a[href*="screen=place"][href*="mode=scavenge"]').each(function() {
+        var $a = $(this);
+        var href = $a.attr('href') || '';
 
-      // Method 1: Try parsing the mass screen table format
-      var $table = $('table.vis:has(th:contains("Village"))');
-      if ($table.length === 0) {
-        // Try other table structures
-        $table = $('table.vis').filter(function() {
-          var text = $(this).find('th').text().toLowerCase();
-          return text.indexOf('village') !== -1 || text.indexOf('dedina') !== -1 || text.indexOf('dorf') !== -1;
+        // Skip navigation links that point to scavenge_mass (the mass page itself)
+        if (href.indexOf('scavenge_mass') !== -1) return;
+
+        var text = $a.text().trim();
+        var coords = TWTools.parseCoords(text);
+        if (!coords) return;
+
+        var villageId = 0;
+        var villageMatch = href.match(/village=(\d+)/);
+        if (villageMatch) villageId = parseInt(villageMatch[1], 10);
+
+        var villageName = text.replace(/\s*\(\d+\|\d+\)\s*K\d+\s*$/, '').trim();
+
+        // Get the table row this link is in
+        var $row = $a.closest('tr');
+        if ($row.length === 0) return;
+
+        // Parse tier checkboxes/images from the row cells
+        var unlockedTiers = [];
+        var $cells = $row.find('td');
+        var tierIndex = 0;
+        $cells.each(function(idx) {
+          if (idx === 0) return; // First cell is village name
+          var $cell = $(this);
+          var $cb = $cell.find('input[type="checkbox"]');
+          var $img = $cell.find('img');
+          if ($cb.length || $img.length) {
+            tierIndex++;
+            // Checkbox not disabled or img present = tier is unlocked/active
+            if (($cb.length && !$cb.prop('disabled')) || $img.length) {
+              unlockedTiers.push(tierIndex);
+            }
+          }
         });
-      }
+
+        villages.push({
+          id: villageId,
+          name: villageName,
+          coords: coords,
+          troops: {}, // No troop data on mass scavenge page
+          unlockedTiers: unlockedTiers.length > 0 ? unlockedTiers : [1, 2, 3, 4],
+          status: 'idle',
+          checked: false
+        });
+      });
+
+      if (villages.length > 0) return villages;
+
+      // Method 2: Try legacy table format with th containing Village/Dedina/Dorf
+      var $table = $('table.vis').filter(function() {
+        var text = $(this).find('th').text().toLowerCase();
+        return text.indexOf('village') !== -1 || text.indexOf('dedina') !== -1 || text.indexOf('dorf') !== -1;
+      });
 
       if ($table.length > 0) {
         $table.find('tbody tr').each(function() {
@@ -295,8 +348,10 @@
         });
       }
 
-      // Method 2: Parse from ScavengeMassScreen JavaScript object
-      if (villages.length === 0 && typeof ScavengeMassScreen !== 'undefined') {
+      if (villages.length > 0) return villages;
+
+      // Method 3: Parse from ScavengeMassScreen JavaScript object (if exists)
+      if (typeof ScavengeMassScreen !== 'undefined') {
         var screenData = ScavengeMassScreen.villages || ScavengeMassScreen.data || [];
         for (var i = 0; i < screenData.length; i++) {
           var d = screenData[i];
@@ -304,7 +359,7 @@
         }
       }
 
-      // Method 3: Parse village data from Scavenge global
+      // Method 4: Parse village data from Scavenge global (if exists)
       if (villages.length === 0 && typeof Scavenge !== 'undefined' && Scavenge.village) {
         villages.push(ScavengeParser._normalizeVillageData(Scavenge.village));
       }
@@ -422,15 +477,62 @@
           var $doc = $('<div>').html(html);
           var villages = [];
 
-          // Parse the fetched page's table
-          $doc.find('table.vis tbody tr').each(function() {
-            var $row = $(this);
-            var $cells = $row.find('td');
-            if ($cells.length < 3) return;
+          // Parse village links from the fetched page (same approach as parseVillageRows)
+          $doc.find('a[href*="screen=place"][href*="mode=scavenge"]').each(function() {
+            var $a = $(this);
+            var href = $a.attr('href') || '';
+            if (href.indexOf('scavenge_mass') !== -1) return;
 
-            var village = ScavengeParser._parseVillageRow($row, $cells);
-            if (village) villages.push(village);
+            var text = $a.text().trim();
+            var coords = TWTools.parseCoords(text);
+            if (!coords) return;
+
+            var villageId = 0;
+            var villageMatch = href.match(/village=(\d+)/);
+            if (villageMatch) villageId = parseInt(villageMatch[1], 10);
+
+            var villageName = text.replace(/\s*\(\d+\|\d+\)\s*K\d+\s*$/, '').trim();
+            var $row = $a.closest('tr');
+
+            var unlockedTiers = [];
+            if ($row.length > 0) {
+              var tierIndex = 0;
+              $row.find('td').each(function(idx) {
+                if (idx === 0) return;
+                var $cell = $(this);
+                var $cb = $cell.find('input[type="checkbox"]');
+                var $img = $cell.find('img');
+                if ($cb.length || $img.length) {
+                  tierIndex++;
+                  if (($cb.length && !$cb.prop('disabled')) || $img.length) {
+                    unlockedTiers.push(tierIndex);
+                  }
+                }
+              });
+            }
+
+            villages.push({
+              id: villageId,
+              name: villageName,
+              coords: coords,
+              troops: {},
+              unlockedTiers: unlockedTiers.length > 0 ? unlockedTiers : [1, 2, 3, 4],
+              status: 'idle',
+              checked: false
+            });
           });
+
+          // Fallback: try legacy table parsing
+          if (villages.length === 0) {
+            $doc.find('table.vis tbody tr').each(function() {
+              var $row = $(this);
+              var $cells = $row.find('td');
+              if ($cells.length < 3) return;
+
+              var village = ScavengeParser._parseVillageRow($row, $cells);
+              if (village) villages.push(village);
+            });
+          }
 
           callback(villages);
         },
@@ -825,7 +927,7 @@
       this._card = TWTools.UI.createCard({
         id: ID_PREFIX + 'card',
         title: 'MASS SCAVENGE',
-        version: 'v' + VERSION,
+        version: VERSION,
         width: 900,
         height: 600,
         tabs: [
