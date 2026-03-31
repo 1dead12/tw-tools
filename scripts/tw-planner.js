@@ -487,6 +487,12 @@
       var dist = TWTools.distance(srcCoords, targetCoords);
       var travel = TWTools.DataFetcher.calcTravelTime(srcCoords, targetCoords, unitType);
       var launchMs = landingTimeMs - travel;
+      // TW mechanic: ms of send click = ms of arrival. Force launch ms to match landing ms.
+      var landingMsComponent = landingTimeMs % 1000;
+      var launchMsComponent = ((launchMs % 1000) + 1000) % 1000;
+      if (launchMsComponent !== landingMsComponent) {
+        launchMs = launchMs - launchMsComponent + landingMsComponent;
+      }
 
       attacks.push({
         source: src,
@@ -1031,6 +1037,12 @@
       if (fakeLandingMs !== null) {
         // Simultaneous arrival
         launchMs = fakeLandingMs - travelMs;
+        // TW mechanic: ms of send = ms of arrival. Force launch ms to match landing ms.
+        var fLandMs = fakeLandingMs % 1000;
+        var fLaunchMs = ((launchMs % 1000) + 1000) % 1000;
+        if (fLaunchMs !== fLandMs) {
+          launchMs = launchMs - fLaunchMs + fLandMs;
+        }
       } else {
         // No landing time specified — calculate for "ASAP" (launch now + 1 min buffer)
         launchMs = nowMs + 60000;
