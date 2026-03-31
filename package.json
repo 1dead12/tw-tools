@@ -1,20 +1,29 @@
 {
-  "name": "tw-train-catcher",
-  "version": "5.0.0",
-  "description": "Tribal Wars in-game snipe timing calculator with ms precision",
+  "name": "tw-tools",
+  "version": "2.1.0",
+  "description": "Tribal Wars script suite — 11 tools: snipe, farm, scavenge, planner, resources, overview, map, tribe, reminders, clock",
   "scripts": {
+    "build": "node build.js",
+    "build:snipe": "node build.js --only=tw-snipe",
+    "build:farm": "node build.js --only=tw-farm",
+    "build:farm-map": "node build.js --only=tw-farm-map",
+    "build:scavenge": "node build.js --only=tw-scavenge",
+    "build:clock": "node build.js --only=tw-clock",
+    "build:planner": "node build.js --only=tw-planner",
+    "build:reminder": "node build.js --only=tw-reminder",
+    "build:resources": "node build.js --only=tw-resources",
+    "build:overview": "node build.js --only=tw-overview",
+    "build:map-tools": "node build.js --only=tw-map-tools",
+    "build:tribe": "node build.js --only=tw-tribe",
     "test": "npx playwright test",
-    "test:unit": "npx playwright test --grep 'inline tests'",
-    "test:e2e": "npx playwright test --grep 'Live Game'",
-    "minify": "npx terser scripts/tw-precision-timer-v5.js --compress --mangle --output scripts/tw-precision-timer-v5.min.js",
-    "quickbar": "printf 'javascript:void(' > scripts/tw-precision-timer-v5.quickbar.js && cat scripts/tw-precision-timer-v5.min.js >> scripts/tw-precision-timer-v5.quickbar.js && printf ')' >> scripts/tw-precision-timer-v5.quickbar.js",
-    "build": "npm run minify && npm run quickbar"
+    "test:unit": "npx playwright test --grep 'unit tests'",
+    "test:e2e": "npx playwright test --grep 'Live Game'"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.0",
     "playwright": "^1.58.0",
     "terser": "^5.0.0"
   },
-  "keywords": ["tribal-wars", "snipe", "calculator", "timing", "quickbar"],
+  "keywords": ["tribal-wars", "snipe", "farm", "scavenge", "calculator", "quickbar"],
   "license": "MIT"
 }

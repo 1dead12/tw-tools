@@ -1,0 +1,1 @@
+javascript:$.getScript('https://1dead12.github.io/tw-tools/dist/tw-snipe.min.js');void 0;

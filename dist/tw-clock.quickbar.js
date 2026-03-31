@@ -1,0 +1,1 @@
+javascript:$.getScript('https://1dead12.github.io/tw-tools/dist/tw-clock.min.js');void 0;
