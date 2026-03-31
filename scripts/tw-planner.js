@@ -247,6 +247,9 @@
    * Loads game data, creates the UI card, and starts live updates.
    */
   function init() {
+    // Initialize TimeSync for accurate countdowns
+    TWTools.TimeSync.init();
+
     Settings.load();
 
     // Load saved plans from storage
@@ -602,9 +605,10 @@
       var launchPrefix = atk.launchTimeMs >= 86400000 ? 'tmw ' :
         (atk.launchTimeMs < 0 ? '(yesterday) ' : '');
 
-      // Rally point link: open rally point with target pre-filled
+      // Rally point link: open rally point with target coords as x/y params
+      var targetParts = pl2.targetCoords.split('|');
       var rallyLink = '/game.php?village=' + atk.source.id +
-        '&screen=place&target=' + encodeURIComponent(pl2.targetCoords);
+        '&screen=place&x=' + targetParts[0] + '&y=' + targetParts[1];
 
       var rowId = ID_PREFIX + 'row-' + entry.planIdx + '-' + entry.attackIdx;
 
@@ -1032,9 +1036,10 @@
         launchMs = nowMs + 60000;
       }
 
-      // Build send link with pre-filled units
-      var sendParams = 'village=' + bestVillage.id + '&screen=place&target=' +
-        encodeURIComponent(targetStr2);
+      // Build send link with target coords as x/y params
+      var targetParts2 = targetStr2.split('|');
+      var sendParams = 'village=' + bestVillage.id + '&screen=place&x=' +
+        targetParts2[0] + '&y=' + targetParts2[1];
 
       var entry = {
         targetCoords: targetStr2,

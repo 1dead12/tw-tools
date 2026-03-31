@@ -151,6 +151,9 @@
    * Loads persisted timers and creates the UI.
    */
   function init() {
+    // Initialize TimeSync for accurate server time
+    TWTools.TimeSync.init();
+
     loadTimers();
     injectCustomStyles();
     createUI();

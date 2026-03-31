@@ -72,7 +72,7 @@
 
       // Build the floating card
       this._buildCard();
-      this._injectStyles();
+      injectStyles();
       this._startAnimation();
     },
 
