@@ -4,7 +4,7 @@
   // ============================================================
   // CONFIG & CONSTANTS
   // ============================================================
-  var VERSION = '6.0.0';
+  var VERSION = '7.0.0';
   var ID_PREFIX = 'tws-';
   var STORAGE_KEY_PREFIX = 'tws_';
   var CACHE_TTL = {
@@ -22,6 +22,21 @@
   };
 
   var ALL_UNIT_TYPES = ['spear', 'sword', 'axe', 'spy', 'light', 'heavy', 'ram', 'catapult', 'knight', 'snob'];
+
+  var UNIT_OPTIONS = [
+    {value: 'spear', label: 'Spear (18)', speed: 18},
+    {value: 'sword', label: 'Sword (22)', speed: 22},
+    {value: 'axe', label: 'Axe (18)', speed: 18},
+    {value: 'archer', label: 'Archer (18)', speed: 18},
+    {value: 'spy', label: 'Scout (9)', speed: 9},
+    {value: 'light', label: 'Light Cav (10)', speed: 10},
+    {value: 'marcher', label: 'Mounted Archer (10)', speed: 10},
+    {value: 'heavy', label: 'Heavy Cav (11)', speed: 11},
+    {value: 'ram', label: 'Ram (30)', speed: 30},
+    {value: 'catapult', label: 'Catapult (30)', speed: 30},
+    {value: 'knight', label: 'Paladin (10)', speed: 10},
+    {value: 'snob', label: 'Noble (35)', speed: 35}
+  ];
 
   var CMD_TYPE = {
     CLEANER: 'cleaner',
@@ -336,34 +351,88 @@
         if ($cmdLink.length === 0) return;
 
         var cmd = {};
+
+        // Parse command type from icon (PRIMARY method)
         var $icon = $cells.eq(colMap.command).find('img').first();
         var iconSrc = ($icon.attr('src') || '').toLowerCase();
+        cmd.iconSrc = iconSrc;
 
         if (iconSrc.indexOf('snob') !== -1 || iconSrc.indexOf('noble') !== -1) {
           cmd.type = CMD_TYPE.NOBLE;
+          cmd.iconType = 'noble';
         } else if (iconSrc.indexOf('support') !== -1 || iconSrc.indexOf('def') !== -1) {
           cmd.type = CMD_TYPE.SUPPORT;
+          cmd.iconType = 'support';
+        } else if (iconSrc.indexOf('spy') !== -1 || iconSrc.indexOf('scout') !== -1) {
+          cmd.type = CMD_TYPE.SCOUT;
+          cmd.iconType = 'scout';
+        } else if (iconSrc.indexOf('att_large') !== -1 || iconSrc.indexOf('attack_large') !== -1) {
+          cmd.type = CMD_TYPE.UNKNOWN;
+          cmd.iconType = 'large_attack';
+        } else if (iconSrc.indexOf('attack') !== -1 || iconSrc.indexOf('att_') !== -1 ||
+                   iconSrc.indexOf('att.') !== -1) {
+          cmd.type = CMD_TYPE.UNKNOWN;
+          cmd.iconType = 'attack';
+        } else if (iconSrc.indexOf('return') !== -1) {
+          cmd.type = CMD_TYPE.SUPPORT;
+          cmd.iconType = 'return';
         } else {
           cmd.type = CMD_TYPE.UNKNOWN;
+          cmd.iconType = 'unknown';
         }
 
+        // Also check command text for support detection
         var cmdText = $cmdLink.text().trim().toLowerCase();
         if (cmdText.indexOf('posil') !== -1 || cmdText.indexOf('support') !== -1 ||
             cmdText.indexOf('unterstützung') !== -1) {
           cmd.type = CMD_TYPE.SUPPORT;
+          if (!cmd.iconType || cmd.iconType === 'unknown') cmd.iconType = 'support';
+        }
+
+        // Check for user-applied labels (TW allows manual tagging via right-click on commands)
+        var $labelImg = $cells.eq(colMap.command).find('img[src*="command/"]');
+        if ($labelImg.length > 1) {
+          // If there are multiple command images, the last one may be user label
+          var lastImgSrc = ($labelImg.last().attr('src') || '').toLowerCase();
+          if (lastImgSrc.indexOf('snob') !== -1) {
+            cmd.type = CMD_TYPE.NOBLE;
+            cmd.iconType = 'noble';
+            cmd.userLabeled = true;
+          }
         }
 
         var cmdHref = $cmdLink.attr('href') || '';
         var idMatch = cmdHref.match(/id=(\d+)/);
         if (idMatch) cmd.commandId = parseInt(idMatch[1], 10);
 
-        var targetText = $cells.eq(colMap.target).text().trim();
+        // Parse target: extract village name, coords, and ID from link
+        var $targetCell = $cells.eq(colMap.target);
+        var $targetLink = $targetCell.find('a[href*="info_village"]');
+        var targetText = $targetCell.text().trim();
         cmd.targetCoords = TWTools.parseCoords(targetText);
         cmd.targetName = targetText.replace(/\s*\(\d+\|\d+\)\s*K\d+\s*$/, '').trim();
+        if ($targetLink.length > 0) {
+          var targetHref = $targetLink.attr('href') || '';
+          var targetIdMatch = targetHref.match(/id=(\d+)/);
+          if (targetIdMatch) cmd.targetVillageId = parseInt(targetIdMatch[1], 10);
+          if (!cmd.targetName) cmd.targetName = $targetLink.text().trim().replace(/\s*\(\d+\|\d+\)\s*K\d+\s*$/, '').trim();
+        }
 
-        var originText = $cells.eq(colMap.origin).text().trim();
+        // Parse origin/source: extract village name, coords, and ID from link
+        var $originCell = $cells.eq(colMap.origin);
+        var $originLink = $originCell.find('a[href*="info_village"]');
+        var originText = $originCell.text().trim();
         cmd.sourceCoords = TWTools.parseCoords(originText);
+        // Extract village name (before coords pattern)
         cmd.sourceName = originText.replace(/\s*\(\d+\|\d+\)\s*K\d+\s*$/, '').trim();
+        if ($originLink.length > 0) {
+          var originHref = $originLink.attr('href') || '';
+          var originIdMatch = originHref.match(/id=(\d+)/);
+          if (originIdMatch) cmd.sourceVillageId = parseInt(originIdMatch[1], 10);
+          // Prefer link text as village name (more reliable)
+          var linkText = $originLink.text().trim().replace(/\s*\(\d+\|\d+\)\s*K\d+\s*$/, '').trim();
+          if (linkText) cmd.sourceName = linkText;
+        }
 
         var $playerLink = $cells.eq(colMap.player).find('a[href*="info_player"]');
         cmd.attacker = $playerLink.text().trim() || 'Unknown';
@@ -393,6 +462,8 @@
       if (window.TWTools && TWTools.Commands && TWTools.Commands.classifyUnit) {
         train.commands.forEach(function(cmd) {
           if (cmd.type === CMD_TYPE.SUPPORT) return;
+          // Skip if icon already gave a definitive type (noble, scout)
+          if (cmd.iconType === 'noble' || cmd.iconType === 'scout') return;
           var classified = TWTools.Commands.classifyUnit(cmd, train.commands, worldSpeed, unitSpeedFactor);
           if (classified) {
             cmd.type = classified.type;
@@ -403,13 +474,15 @@
         return;
       }
 
-      // Fallback: local heuristic
+      // Fallback: local heuristic (only applies to commands where icon didn't determine type)
       var ws = worldSpeed || 1;
       var usf = unitSpeedFactor || 1;
       var dist = train.commands[0].distance || 0;
       if (dist === 0) {
-        train.commands[0].type = CMD_TYPE.CLEANER;
-        train.commands[0].autoClassified = true;
+        if (!train.commands[0].iconType || train.commands[0].iconType === 'unknown' || train.commands[0].iconType === 'attack') {
+          train.commands[0].type = CMD_TYPE.CLEANER;
+          train.commands[0].autoClassified = true;
+        }
         return;
       }
 
@@ -424,7 +497,7 @@
       train.commands.sort(function(a, b) { return a.arrivalMs - b.arrivalMs; });
       if (train.commands.length === 1) {
         if (train.commands[0].type === CMD_TYPE.UNKNOWN) {
-          cmd.detectedUnit = 'single attack';
+          train.commands[0].detectedUnit = 'single attack';
         }
         return;
       }
@@ -437,6 +510,8 @@
 
       train.commands.forEach(function(cmd, idx) {
         if (cmd.type === CMD_TYPE.SUPPORT) return;
+        // Skip if icon already gave a definitive type (noble, scout)
+        if (cmd.iconType === 'noble' || cmd.iconType === 'scout') return;
         var gap = cmd.arrivalMs - firstArrival;
         if (idx === 0) {
           cmd.type = CMD_TYPE.CLEANER;
@@ -588,6 +663,10 @@
     targetBarb: null,
     travelTimeMs: 0,
     unitType: 'ram',
+    // Timer source config - village/unit selections
+    selectedMyVillageId: null,
+    selectedBarbId: null,
+    selectedUnitType: 'ram',
     // Scanner tab
     scanTarget: '',
     scanArrival: '',
@@ -601,6 +680,7 @@
     returnManualSource: '',
     returnManualTarget: '',
     returnManualUnit: 'light',
+    returnMyVillageId: null,
     // Coordination tab
     coordMode: 'A',
     coordTarget: '',
@@ -635,10 +715,14 @@
         selectedGapBefore: this.selectedGapBefore,
         mode: this.mode,
         unitType: this.unitType,
+        selectedMyVillageId: this.selectedMyVillageId,
+        selectedBarbId: this.selectedBarbId,
+        selectedUnitType: this.selectedUnitType,
         scanTarget: this.scanTarget,
         scanUnits: this.scanUnits,
         coordMode: this.coordMode,
-        returnManualUnit: this.returnManualUnit
+        returnManualUnit: this.returnManualUnit,
+        returnMyVillageId: this.returnMyVillageId
       });
     },
 
@@ -651,10 +735,14 @@
         this.selectedGapBefore = saved.selectedGapBefore !== undefined ? saved.selectedGapBefore : null;
         this.mode = saved.mode || 'A';
         this.unitType = saved.unitType || 'ram';
+        this.selectedMyVillageId = saved.selectedMyVillageId || null;
+        this.selectedBarbId = saved.selectedBarbId || null;
+        this.selectedUnitType = saved.selectedUnitType || 'ram';
         this.scanTarget = saved.scanTarget || '';
         if (saved.scanUnits) this.scanUnits = saved.scanUnits;
         this.coordMode = saved.coordMode || 'A';
         this.returnManualUnit = saved.returnManualUnit || 'light';
+        this.returnMyVillageId = saved.returnMyVillageId || null;
       }
     },
 
@@ -947,6 +1035,71 @@
     var m = str.match(/(\d{1,3})\|(\d{1,3})/);
     if (!m) return null;
     return { x: parseInt(m[1], 10), y: parseInt(m[2], 10) };
+  }
+
+  /**
+   * Build <option> tags for unit dropdown
+   */
+  function buildUnitOptions(selectedValue) {
+    var html = '';
+    for (var i = 0; i < UNIT_OPTIONS.length; i++) {
+      var opt = UNIT_OPTIONS[i];
+      var sel = opt.value === selectedValue ? ' selected' : '';
+      html += '<option value="' + opt.value + '"' + sel + '>' + opt.label + '</option>';
+    }
+    return html;
+  }
+
+  /**
+   * Build <option> tags for player village dropdown, sorted by distance to a target
+   */
+  function buildVillageOptions(villages, selectedId, targetCoords) {
+    var items = [];
+    for (var i = 0; i < villages.length; i++) {
+      var v = villages[i];
+      var dist = targetCoords ? Data.distance(v, targetCoords) : 0;
+      items.push({ village: v, dist: dist });
+    }
+    if (targetCoords) {
+      items.sort(function(a, b) { return a.dist - b.dist; });
+    }
+    var html = '<option value="">-- Select village --</option>';
+    for (var j = 0; j < items.length; j++) {
+      var item = items[j];
+      var v = item.village;
+      var sel = v.id === selectedId ? ' selected' : '';
+      var distLabel = targetCoords ? ' [' + item.dist.toFixed(1) + 'f]' : '';
+      html += '<option value="' + v.id + '"' + sel + '>' +
+        (v.name || 'Village') + ' (' + v.x + '|' + v.y + ')' + distLabel + '</option>';
+    }
+    return html;
+  }
+
+  /**
+   * Build <option> tags for nearby barbarian villages dropdown
+   */
+  function buildBarbOptions(barbs, selectedId, sourceCoords, maxResults) {
+    maxResults = maxResults || 20;
+    if (!barbs || !barbs.length || !sourceCoords) return '<option value="">No barbs loaded</option>';
+    var nearBarbs = Data.findNearestBarbs(sourceCoords, maxResults, barbs);
+    var html = '<option value="">-- Select barb --</option>';
+    for (var i = 0; i < nearBarbs.length; i++) {
+      var b = nearBarbs[i];
+      var sel = b.village.id === selectedId ? ' selected' : '';
+      html += '<option value="' + b.village.id + '"' + sel + '>(' + b.village.x + '|' + b.village.y + ') [' + b.dist.toFixed(1) + 'f]</option>';
+    }
+    return html;
+  }
+
+  /**
+   * Find a village by ID in an array
+   */
+  function findVillageById(villages, id) {
+    if (!id) return null;
+    for (var i = 0; i < villages.length; i++) {
+      if (villages[i].id === id) return villages[i];
+    }
+    return null;
   }
 
   // ============================================================
@@ -1276,7 +1429,7 @@
       var html = '<div class="tws-section">';
       html += '<div class="tws-section-title">Train Breakdown \u2014 click gap to set return target, click type to change</div>';
       html += '<table class="tws-table"><thead><tr>' +
-        '<th>#</th><th>Type</th><th>Arrival</th><th>MS</th><th>Source</th><th>Dist</th>' +
+        '<th>#</th><th>Type</th><th>Arrival</th><th>Source Village</th><th>Dist</th>' +
         '</tr></thead><tbody>';
 
       train.commands.forEach(function(cmd, idx) {
@@ -1287,31 +1440,62 @@
                          train.commands[idx - 1].type === CMD_TYPE.CLEANER ? 'cleaner' : 'cmd';
           html += '<tr class="tws-row-gap' + (isSelected ? ' selected' : '') +
             '" data-after="' + (idx - 1) + '" data-before="' + idx + '">' +
-            '<td colspan="6">\u25BC return HERE \u25BC (after ' + prevLabel + ' #' + idx + ')</td></tr>';
+            '<td colspan="5">\u25BC return HERE \u25BC (after ' + prevLabel + ' #' + idx + ')</td></tr>';
         }
 
+        // Type badge: use icon-based type as primary, heuristic as fallback
         var badge = BADGE_COLORS[cmd.type] || BADGE_COLORS.unknown;
         var autoTag = cmd.autoClassified ? ' *' : '';
-        var detectedHint = cmd.detectedUnit ? ' title="' + cmd.detectedUnit + '"' : '';
-        var arrivalDisplay = cmd.arrivalMs > 86400000 ?
-          'tmrw ' + formatTime(cmd.arrivalMs - 86400000) : formatTime(cmd.arrivalMs || 0);
-        var sourceDisplay = cmd.sourceName ? cmd.sourceName.substring(0, 12) : '';
-        if (cmd.sourceCoords) sourceDisplay += ' (' + formatCoords(cmd.sourceCoords) + ')';
+        var iconHint = '';
+        if (cmd.iconType && cmd.iconType !== 'unknown') {
+          iconHint = cmd.iconType;
+        }
+        if (cmd.detectedUnit) {
+          iconHint = iconHint ? iconHint + ' / ' + cmd.detectedUnit : cmd.detectedUnit;
+        }
+        if (cmd.userLabeled) {
+          iconHint = iconHint ? iconHint + ' (labeled)' : 'user labeled';
+        }
+        var detectedHint = iconHint ? ' title="' + iconHint + '"' : '';
+
+        // Arrival time: show ACTUAL arrival with ms precision
+        var arrivalDisplay = '';
+        if (cmd.arrivalMs) {
+          arrivalDisplay = cmd.arrivalMs > 86400000 ?
+            'tmrw ' + formatTime(cmd.arrivalMs - 86400000) : formatTime(cmd.arrivalMs);
+        } else if (cmd.timeMs) {
+          arrivalDisplay = cmd.timeMs > 86400000 ?
+            'tmrw ' + formatTime(cmd.timeMs - 86400000) : formatTime(cmd.timeMs);
+        } else {
+          arrivalDisplay = '??:??:??:???';
+        }
+
+        // Source village: show village name + coords as hyperlink
+        var sourceDisplay = '';
+        if (cmd.sourceVillageId && cmd.sourceCoords) {
+          var villageName = cmd.sourceName || 'Village';
+          sourceDisplay = '<a href="/game.php?screen=info_village&id=' + cmd.sourceVillageId +
+            '" target="_blank" style="color:' + COLORS.accent + ';text-decoration:underline">' +
+            villageName + ' (' + formatCoords(cmd.sourceCoords) + ')</a>';
+        } else if (cmd.sourceCoords) {
+          var srcName = cmd.sourceName || '';
+          sourceDisplay = srcName ? srcName + ' (' + formatCoords(cmd.sourceCoords) + ')' : formatCoords(cmd.sourceCoords);
+        } else if (cmd.sourceName) {
+          sourceDisplay = cmd.sourceName;
+        }
 
         html += '<tr data-idx="' + idx + '">' +
           '<td>' + (idx + 1) + '</td>' +
           '<td class="tws-toggle-type" data-idx="' + idx + '" style="cursor:pointer"' + detectedHint + '>' +
             '<span class="tws-badge" style="background:' + badge.bg + ';color:' + badge.fg + '">' + badge.label + autoTag + '</span></td>' +
           '<td class="tws-mono">' + arrivalDisplay + '</td>' +
-          '<td><input class="tws-input tws-input-ms tws-cmd-ms" type="number" min="0" max="999" ' +
-            'value="' + (cmd.ms || 0) + '" data-idx="' + idx + '" placeholder="000"></td>' +
           '<td style="font-size:10px">' + sourceDisplay + '</td>' +
           '<td>' + (cmd.distance ? cmd.distance.toFixed(1) : '') + '</td>' +
           '</tr>';
       });
 
       html += '</tbody></table>';
-      html += '<div style="font-size:9px;color:' + COLORS.textDim + ';margin-top:3px">* = auto-classified. Click type badge to cycle.</div>';
+      html += '<div style="font-size:9px;color:' + COLORS.textDim + ';margin-top:3px">* = auto-classified by heuristic. Click type badge to cycle. Hover for detection details.</div>';
       html += '</div>';
       return html;
     },
@@ -1374,29 +1558,63 @@
     _renderSourceConfig: function() {
       var train = State.getSelectedTrain();
       if (!train) return '';
+      var targetCoords = train.targetCoords;
       var html = '<div class="tws-section"><div class="tws-section-title">Source Configuration</div>';
 
       if (State.mode === 'A') {
-        html += '<div class="tws-grid-3">';
-        html += '<div><span class="tws-label">Barb Coords</span><input class="tws-input tws-input-coords" id="' + ID_PREFIX + 'barb-coords" placeholder="525|574" value="' + (State.targetBarb ? formatCoords(State.targetBarb) : '') + '"></div>';
-        html += '<div><span class="tws-label">Unit Type</span><select class="tws-select" id="' + ID_PREFIX + 'unit-type">';
-        ALL_UNIT_TYPES.forEach(function(u) {
-          var sel = u === State.unitType ? ' selected' : '';
-          html += '<option value="' + u + '"' + sel + '>' + u + ' (' + (DEFAULT_UNIT_SPEEDS[u] || '?') + ')</option>';
-        });
-        html += '</select></div>';
-        html += '<div><span class="tws-label">Travel Time</span><input class="tws-input tws-input-time" id="' + ID_PREFIX + 'travel-time" placeholder="H:MM:SS" value="' + (State.travelTimeMs ? formatTimeSec(State.travelTimeMs) : '') + '"></div>';
+        // Mode A: Round-trip barb. Need: My Village + Barb Village + Unit
+        html += '<div class="tws-grid-2" style="margin-bottom:6px">';
+        html += '<div><span class="tws-label">My Village</span><select class="tws-select" id="' + ID_PREFIX + 'my-village" style="width:100%">' +
+          buildVillageOptions(State.playerVillages, State.selectedMyVillageId, targetCoords) + '</select></div>';
+        html += '<div><span class="tws-label">Unit Type</span><select class="tws-select" id="' + ID_PREFIX + 'unit-type" style="width:100%">' +
+          buildUnitOptions(State.selectedUnitType) + '</select></div>';
         html += '</div>';
+
+        // Barb dropdown (populated based on selected village)
+        var barbSource = State.selectedMyVillageId ? findVillageById(State.playerVillages, State.selectedMyVillageId) : targetCoords;
+        html += '<div style="margin-bottom:6px"><span class="tws-label">Nearby Barbarian Village</span>' +
+          '<select class="tws-select" id="' + ID_PREFIX + 'barb-select" style="width:100%">' +
+          buildBarbOptions(State.barbVillages, State.selectedBarbId, barbSource, 30) + '</select></div>';
+
+        // Show calculated travel time (read-only)
+        var travelDisplay = State.travelTimeMs ? formatTimeSec(State.travelTimeMs) : '--:--:--';
+        html += '<div class="tws-flex" style="gap:12px;margin-bottom:6px">';
+        html += '<div><span class="tws-label">Travel Time (auto)</span><div class="tws-mono" style="font-size:14px;color:' + COLORS.accent + '">' + travelDisplay + '</div></div>';
+        html += '<div><span class="tws-label">Round Trip</span><div class="tws-mono" style="font-size:14px;color:' + COLORS.accent + '">' + (State.travelTimeMs ? formatTimeSec(State.travelTimeMs * 2) : '--:--:--') + '</div></div>';
+        html += '</div>';
+
+        // Load barbs button if not loaded
+        if (State.barbVillages.length === 0) {
+          html += '<div class="tws-warn">Barb villages not loaded. <button class="tws-btn tws-btn-sm" id="' + ID_PREFIX + 'load-barbs">Load Barbs</button></div>';
+        }
+
       } else if (State.mode === 'B') {
-        html += '<div class="tws-grid-2">';
-        html += '<div><span class="tws-label">Target Coords</span><input class="tws-input tws-input-coords" id="' + ID_PREFIX + 'target-coords" placeholder="543|571" value="' + (train.targetCoords ? formatCoords(train.targetCoords) : '') + '"></div>';
-        html += '<div><span class="tws-label">Travel Time</span><input class="tws-input tws-input-time" id="' + ID_PREFIX + 'travel-time" placeholder="H:MM:SS" value="' + (State.travelTimeMs ? formatTimeSec(State.travelTimeMs) : '') + '"></div>';
+        // Mode B: Support + Recall. Need: My Village + Unit
+        html += '<div class="tws-grid-2" style="margin-bottom:6px">';
+        html += '<div><span class="tws-label">My Village</span><select class="tws-select" id="' + ID_PREFIX + 'my-village" style="width:100%">' +
+          buildVillageOptions(State.playerVillages, State.selectedMyVillageId, targetCoords) + '</select></div>';
+        html += '<div><span class="tws-label">Unit Type (slowest)</span><select class="tws-select" id="' + ID_PREFIX + 'unit-type" style="width:100%">' +
+          buildUnitOptions(State.selectedUnitType) + '</select></div>';
         html += '</div>';
+
+        // Show calculated travel time (read-only)
+        var travelDisplayB = State.travelTimeMs ? formatTimeSec(State.travelTimeMs) : '--:--:--';
+        html += '<div style="margin-bottom:6px"><span class="tws-label">Travel Time to Target (auto)</span>' +
+          '<div class="tws-mono" style="font-size:14px;color:' + COLORS.accent + '">' + travelDisplayB + '</div></div>';
+
       } else {
-        html += '<div class="tws-grid-2">';
-        html += '<div><span class="tws-label">Source Village</span><input class="tws-input tws-input-coords" id="' + ID_PREFIX + 'source-coords" placeholder="542|570" value="' + (State.sourceVillage ? formatCoords(State.sourceVillage) : '') + '"></div>';
-        html += '<div><span class="tws-label">Travel Time</span><input class="tws-input tws-input-time" id="' + ID_PREFIX + 'travel-time" placeholder="H:MM:SS" value="' + (State.travelTimeMs ? formatTimeSec(State.travelTimeMs) : '') + '"></div>';
+        // Mode C: One-way support. Need: My Village + Unit
+        html += '<div class="tws-grid-2" style="margin-bottom:6px">';
+        html += '<div><span class="tws-label">My Village</span><select class="tws-select" id="' + ID_PREFIX + 'my-village" style="width:100%">' +
+          buildVillageOptions(State.playerVillages, State.selectedMyVillageId, targetCoords) + '</select></div>';
+        html += '<div><span class="tws-label">Unit Type</span><select class="tws-select" id="' + ID_PREFIX + 'unit-type" style="width:100%">' +
+          buildUnitOptions(State.selectedUnitType) + '</select></div>';
         html += '</div>';
+
+        // Show calculated travel time (read-only)
+        var travelDisplayC = State.travelTimeMs ? formatTimeSec(State.travelTimeMs) : '--:--:--';
+        html += '<div style="margin-bottom:6px"><span class="tws-label">Travel Time to Target (auto)</span>' +
+          '<div class="tws-mono" style="font-size:14px;color:' + COLORS.accent + '">' + travelDisplayC + '</div></div>';
       }
 
       html += '<div style="margin-top:6px"><button class="tws-btn tws-btn-primary" id="' + ID_PREFIX + 'calculate">CALCULATE</button></div>';
@@ -1474,6 +1692,33 @@
       return html;
     },
 
+    /**
+     * Auto-calculate travel time based on current selections
+     */
+    _autoCalcTravelTime: function() {
+      var train = State.getSelectedTrain();
+      if (!train) return;
+      var targetCoords = train.targetCoords;
+      var myVillage = findVillageById(State.playerVillages, State.selectedMyVillageId);
+      var unitType = State.selectedUnitType || 'ram';
+
+      if (State.mode === 'A') {
+        // Round-trip: travel from my village to barb
+        var barb = findVillageById(State.barbVillages, State.selectedBarbId);
+        if (myVillage && barb) {
+          State.travelTimeMs = Data.travelTime(myVillage, barb, unitType);
+          State.sourceVillage = { x: myVillage.x, y: myVillage.y };
+          State.targetBarb = { x: barb.x, y: barb.y };
+        }
+      } else if (State.mode === 'B' || State.mode === 'C') {
+        // Support/recall or one-way: travel from my village to attack target
+        if (myVillage && targetCoords) {
+          State.travelTimeMs = Data.travelTime(myVillage, targetCoords, unitType);
+          State.sourceVillage = { x: myVillage.x, y: myVillage.y };
+        }
+      }
+    },
+
     _renderPrecisionBarSection: function(win) {
       var html = '<div class="tws-section"><div class="tws-section-title">MS Precision Bar</div>';
       html += '<div class="tws-ms-bar"><canvas id="' + ID_PREFIX + 'ms-canvas" style="width:100%;height:100%"></canvas></div>';
@@ -1519,19 +1764,6 @@
         self.renderTimerTab();
       });
 
-      // MS input
-      $el('tab-timer').on('change', '.tws-cmd-ms', function() {
-        var idx = parseInt($(this).data('idx'), 10);
-        var val = parseInt($(this).val(), 10) || 0;
-        var train = State.getSelectedTrain();
-        if (train && train.commands[idx]) {
-          train.commands[idx].ms = Math.max(0, Math.min(999, val));
-          train.commands[idx].timeMs = (train.commands[idx].arrivalSec || 0) + train.commands[idx].ms;
-          train.commands[idx].arrivalMs = train.commands[idx].timeMs;
-          State.saveTrains();
-        }
-      });
-
       // Toggle type
       $el('tab-timer').on('click', '.tws-toggle-type', function() {
         var idx = parseInt($(this).data('idx'), 10);
@@ -1573,24 +1805,44 @@
         self.renderTimerTab();
       });
 
-      // Calculate
-      $el('calculate').on('click', function() {
-        var ttInput = $el('travel-time').val();
-        if (ttInput) State.travelTimeMs = parseTimeToMs(ttInput);
-        var barbInput = $el('barb-coords').val();
-        if (barbInput) State.targetBarb = parseCoords(barbInput);
-        var unitInput = $el('unit-type').val();
-        if (unitInput) State.unitType = unitInput;
-        var srcInput = $el('source-coords').val();
-        if (srcInput) State.sourceVillage = parseCoords(srcInput);
-        var tgtInput = $el('target-coords').val();
-        if (tgtInput) State.targetBarb = parseCoords(tgtInput);
+      // My Village dropdown change
+      $el('tab-timer').on('change', '#' + ID_PREFIX + 'my-village', function() {
+        var villageId = parseInt($(this).val(), 10) || null;
+        State.selectedMyVillageId = villageId;
+        self._autoCalcTravelTime();
+        State.save();
+        self.renderTimerTab();
+      });
 
-        // Auto-calc travel time if possible
-        if (State.mode === 'A' && State.targetBarb && !ttInput && typeof game_data !== 'undefined') {
-          var source = { x: game_data.village.x, y: game_data.village.y };
-          State.travelTimeMs = Data.travelTime(source, State.targetBarb, State.unitType);
-        }
+      // Barb dropdown change
+      $el('tab-timer').on('change', '#' + ID_PREFIX + 'barb-select', function() {
+        var barbId = parseInt($(this).val(), 10) || null;
+        State.selectedBarbId = barbId;
+        self._autoCalcTravelTime();
+        State.save();
+        self.renderTimerTab();
+      });
+
+      // Unit type dropdown change
+      $el('tab-timer').on('change', '#' + ID_PREFIX + 'unit-type', function() {
+        State.selectedUnitType = $(this).val();
+        self._autoCalcTravelTime();
+        State.save();
+        self.renderTimerTab();
+      });
+
+      // Load barbs button
+      $el('tab-timer').on('click', '#' + ID_PREFIX + 'load-barbs', function() {
+        $(this).text('Loading...').prop('disabled', true);
+        Data.fetchBarbVillages(function(barbs) {
+          State.barbVillages = barbs;
+          self.renderTimerTab();
+        });
+      });
+
+      // Calculate button
+      $el('calculate').on('click', function() {
+        self._autoCalcTravelTime();
         State.save();
         self.renderTimerTab();
       });
@@ -1841,18 +2093,21 @@
       html += '<div style="display:flex;align-items:flex-end"><button class="tws-btn" id="' + ID_PREFIX + 'return-parse-outgoing">Parse Outgoing (Rally Point)</button></div>';
       html += '</div>';
 
+      // My Village dropdown for return-snipe
+      html += '<div class="tws-grid-2" style="margin-top:6px">';
+      html += '<div><span class="tws-label">My Village (troops return here)</span><select class="tws-select" id="' + ID_PREFIX + 'return-my-village" style="width:100%">' +
+        buildVillageOptions(State.playerVillages, State.returnMyVillageId, null) + '</select></div>';
+      html += '<div></div>';
+      html += '</div>';
+
       // Manual input section
       html += '<div style="margin-top:8px;border-top:1px solid ' + COLORS.borderLight + ';padding-top:8px">';
-      html += '<div class="tws-section-title" style="font-size:10px">Manual Input</div>';
+      html += '<div class="tws-section-title" style="font-size:10px">Manual Input (alternative)</div>';
       html += '<div class="tws-grid-3">';
       html += '<div><span class="tws-label">Source Coords (your village)</span><input class="tws-input tws-input-coords" id="' + ID_PREFIX + 'return-manual-source" placeholder="463|595" value="' + State.returnManualSource + '"></div>';
       html += '<div><span class="tws-label">Target Coords (where troops went)</span><input class="tws-input tws-input-coords" id="' + ID_PREFIX + 'return-manual-target" placeholder="408|510" value="' + State.returnManualTarget + '"></div>';
-      html += '<div><span class="tws-label">Unit Type</span><select class="tws-select" id="' + ID_PREFIX + 'return-manual-unit">';
-      ALL_UNIT_TYPES.forEach(function(u) {
-        var sel = u === State.returnManualUnit ? ' selected' : '';
-        html += '<option value="' + u + '"' + sel + '>' + u + '</option>';
-      });
-      html += '</select></div>';
+      html += '<div><span class="tws-label">Unit Type</span><select class="tws-select" id="' + ID_PREFIX + 'return-manual-unit">' +
+        buildUnitOptions(State.returnManualUnit) + '</select></div>';
       html += '</div>';
       html += '<div style="margin-top:4px"><button class="tws-btn tws-btn-sm" id="' + ID_PREFIX + 'return-add-manual">Add Manual Command</button></div>';
       html += '</div>';
@@ -1966,6 +2221,12 @@
     _bindReturnSnipeEvents: function() {
       var self = this;
 
+      // My Village dropdown for return-snipe
+      $el('return-my-village').on('change', function() {
+        State.returnMyVillageId = parseInt($(this).val(), 10) || null;
+        State.save();
+      });
+
       // Parse outgoing from rally point
       $el('return-parse-outgoing').on('click', function() {
         var commands = IncomingParser.parseOutgoingCommands();
@@ -1975,7 +2236,15 @@
           return;
         }
 
-        var myVillage = typeof game_data !== 'undefined' ? { x: game_data.village.x, y: game_data.village.y } : null;
+        // Use selected village or current village as home
+        var myVillage = null;
+        if (State.returnMyVillageId) {
+          myVillage = findVillageById(State.playerVillages, State.returnMyVillageId);
+        }
+        if (!myVillage && typeof game_data !== 'undefined') {
+          myVillage = { x: game_data.village.x, y: game_data.village.y };
+        }
+
         var processed = [];
         commands.forEach(function(cmd) {
           if (cmd.targetCoords && myVillage) {
@@ -2596,13 +2865,26 @@
         }
       }
 
-      // Get player villages from DOM
+      // Load player villages and barb villages in parallel
+      var dataLoaded = 0;
+      var dataTotal = 2;
+      function onDataLoaded() {
+        dataLoaded++;
+        if (dataLoaded >= dataTotal) {
+          // Show UI once all data is ready
+          UI.show();
+        }
+      }
+
       Data.fetchPlayerVillages(function(villages) {
         State.playerVillages = villages;
+        onDataLoaded();
       });
 
-      // Show UI
-      UI.show();
+      Data.fetchBarbVillages(function(barbs) {
+        State.barbVillages = barbs;
+        onDataLoaded();
+      });
     }
 
     Data.fetchWorldConfig(function(config) {
@@ -2636,6 +2918,11 @@
       calcModeC: calcModeC,
       buildTargetTime: buildTargetTime,
       remainingStatus: remainingStatus,
+      buildUnitOptions: buildUnitOptions,
+      buildVillageOptions: buildVillageOptions,
+      buildBarbOptions: buildBarbOptions,
+      findVillageById: findVillageById,
+      UNIT_OPTIONS: UNIT_OPTIONS,
       TimeSync: TimeSync,
       Storage: Storage,
       Data: Data,
