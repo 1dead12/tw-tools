@@ -1,1 +1,1 @@
-javascript:$.getScript('https://1dead12.github.io/tw-tools/dist/tw-map-tools.min.js');void 0;
+javascript:$.getScript('https://1dead12.github.io/tw-tools/dist/tw-map-tools.min.js?v='+Date.now());void 0;

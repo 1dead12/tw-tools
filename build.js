@@ -233,9 +233,9 @@ async function buildScript(scriptFilename) {
   // Write minified file
   fs.writeFileSync(minPath, minCode, 'utf8');
 
-  // Generate quickbar wrapper
+  // Generate quickbar wrapper (cache-busting: append timestamp on each load)
   const quickbarUrl = GITHUB_PAGES_BASE + '/' + scriptName + '.min.js';
-  const quickbarCode = "javascript:$.getScript('" + quickbarUrl + "');void 0;";
+  const quickbarCode = "javascript:$.getScript('" + quickbarUrl + "?v='+Date.now());void 0;";
   fs.writeFileSync(quickbarPath, quickbarCode, 'utf8');
 
   return {
