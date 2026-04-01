@@ -659,6 +659,14 @@
       showReminderDialog(label, launchMs);
     });
 
+    // Bind delete reminder buttons (× in alarm cells and summary)
+    $container.off('click', '.' + ID_PREFIX + 'del-reminder');
+    $container.on('click', '.' + ID_PREFIX + 'del-reminder', function() {
+      var rid = $(this).attr('data-rid');
+      deleteReminder(rid);
+      renderAllPlans();
+    });
+
     // Render active reminders summary below the attack table
     renderRemindersSummary($container);
   }
@@ -705,7 +713,9 @@
       var color = remaining <= 0 ? '#cc0000' : (remaining < 30000 ? '#cc8800' : '#2a6a8a');
       parts.push('<span class="' + ID_PREFIX + 'alarm-countdown" data-target="' + rm.targetTimeAbsMs + '" ' +
         'style="color:' + color + ';font-weight:bold;">&#9200; ' +
-        (remaining <= 0 ? 'NOW!' : formatCountdown(remaining)) + '</span>');
+        (remaining <= 0 ? 'NOW!' : formatCountdown(remaining)) + '</span>' +
+        '<span class="' + ID_PREFIX + 'del-reminder" data-rid="' + escapeHtml(rm.id) + '" ' +
+        'style="cursor:pointer;color:#a02020;font-size:11px;margin-left:3px;" title="Delete">&times;</span>');
     }
     return parts.length > 0 ? parts.join('<br>') : '<span style="color:#ccc;">—</span>';
   }
@@ -752,16 +762,39 @@
       html += '<div class="' + ID_PREFIX + 'reminder-row" data-rid="' + r.id + '" style="' +
         'display:flex;justify-content:space-between;align-items:center;' +
         'padding:3px 0;border-bottom:1px solid #d0e0c0;font-size:10px;">' +
-        '<span style="color:#3a3a0a;">' + icon + ' ' + escapeHtml(r.label || 'Reminder') + '</span>' +
+        '<span style="color:#3a3a0a;flex:1;">' + icon + ' ' + escapeHtml(r.label || 'Reminder') + '</span>' +
         '<span class="' + ID_PREFIX + 'rem-countdown" data-target="' + r.targetTimeAbsMs + '" ' +
-          'style="font-family:monospace;font-weight:bold;color:' + color + ';">' +
+          'style="font-family:monospace;font-weight:bold;color:' + color + ';margin:0 8px;">' +
           (remaining <= 0 ? 'ALERT!' : formatCountdown(remaining)) +
         '</span>' +
+        '<span class="' + ID_PREFIX + 'del-reminder" data-rid="' + escapeHtml(r.id) + '" ' +
+          'style="cursor:pointer;color:#a02020;font-weight:bold;font-size:12px;" title="Delete reminder">&times;</span>' +
         '</div>';
     }
 
     html += '</div>';
     $container.append(html);
+
+    // Bind delete buttons
+    $container.off('click', '.' + ID_PREFIX + 'del-reminder');
+    $container.on('click', '.' + ID_PREFIX + 'del-reminder', function() {
+      var rid = $(this).attr('data-rid');
+      deleteReminder(rid);
+      renderAllPlans();
+    });
+  }
+
+  /**
+   * Delete a reminder by ID from shared localStorage.
+   * @param {string} reminderId - Reminder ID to remove.
+   */
+  function deleteReminder(reminderId) {
+    try {
+      var all = JSON.parse(localStorage.getItem('twr_timers') || '[]');
+      var filtered = all.filter(function(r) { return r.id !== reminderId; });
+      localStorage.setItem('twr_timers', JSON.stringify(filtered));
+      TWTools.UI.toast('Reminder deleted', 'warning');
+    } catch (e) {}
   }
 
   /**
