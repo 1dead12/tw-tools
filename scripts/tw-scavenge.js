@@ -540,6 +540,290 @@
           callback([]);
         }
       });
+    },
+
+    /**
+     * Fetch troop counts for all villages from the troops overview page.
+     * Primary source: /game.php?village={id}&screen=overview_villages&mode=units&type=own_home
+     * This page shows a table with ALL villages and their home troops in a single request.
+     *
+     * @param {Array.<Object>} villages - Village objects (need .id populated).
+     * @param {function(Object.<number, Object.<string, number>>)} callback -
+     *   Called with a map of { villageId: { spear: N, sword: N, ... } }.
+     */
+    fetchTroopCounts: function(villages, callback) {
+      if (!villages || villages.length === 0) {
+        callback({});
+        return;
+      }
+
+      var url = '/game.php?village=' + TWTools.getVillageId() +
+                '&screen=overview_villages&mode=units&type=own_home';
+
+      $.ajax({
+        url: url,
+        dataType: 'html',
+        success: function(html) {
+          var troopMap = ScavengeParser._parseTroopOverviewPage(html);
+
+          // Check if we actually got data for any villages
+          var hasData = false;
+          for (var key in troopMap) {
+            if (troopMap.hasOwnProperty(key)) {
+              hasData = true;
+              break;
+            }
+          }
+
+          if (hasData) {
+            callback(troopMap);
+          } else {
+            // Fallback: fetch individual village scavenge pages
+            ScavengeParser._fetchTroopsFallback(villages, callback);
+          }
+        },
+        error: function() {
+          // Fallback: fetch individual village scavenge pages
+          ScavengeParser._fetchTroopsFallback(villages, callback);
+        }
+      });
+    },
+
+    /**
+     * Parse the troops overview page HTML to extract troop counts per village.
+     * The overview table has unit type headers (images with unit_sprite classes or
+     * text/alt attributes) and one row per village with counts.
+     *
+     * @private
+     * @param {string} html - Raw HTML of the overview page.
+     * @returns {Object.<number, Object.<string, number>>} Map of villageId -> troops.
+     */
+    _parseTroopOverviewPage: function(html) {
+      var troopMap = {};
+      var $doc = $('<div>').html(html);
+
+      // Find the units table — it contains unit header images
+      var $table = $doc.find('table#units_table');
+      if ($table.length === 0) {
+        // Fallback: find table with unit sprite images in headers
+        $table = $doc.find('table').filter(function() {
+          return $(this).find('th img[src*="unit_"], th .unit_sprite, th img[class*="unit_"]').length > 0;
+        }).first();
+      }
+      if ($table.length === 0) return troopMap;
+
+      // Parse column order from header — detect which column maps to which unit type
+      var columnUnits = [];
+      $table.find('thead th, tr:first th').each(function() {
+        var $th = $(this);
+        var unitType = null;
+
+        // Check for unit sprite image: class like "unit_sprite_axe" or src containing unit name
+        var $img = $th.find('img[src*="unit_"], img[class*="unit_"], .unit_sprite');
+        if ($img.length > 0) {
+          var imgClass = $img.attr('class') || '';
+          var imgSrc = $img.attr('src') || '';
+          var imgAlt = ($img.attr('alt') || '').toLowerCase();
+          var imgTitle = ($img.attr('title') || '').toLowerCase();
+
+          for (var i = 0; i < ALL_UNIT_TYPES.length; i++) {
+            var u = ALL_UNIT_TYPES[i];
+            if (imgClass.indexOf(u) !== -1 || imgSrc.indexOf(u) !== -1 ||
+                imgAlt.indexOf(u) !== -1 || imgTitle.indexOf(u) !== -1) {
+              unitType = u;
+              break;
+            }
+          }
+        }
+
+        // Also check header text content as fallback
+        if (!unitType) {
+          var text = $th.text().trim().toLowerCase();
+          for (var j = 0; j < ALL_UNIT_TYPES.length; j++) {
+            if (text === ALL_UNIT_TYPES[j] || text.indexOf(ALL_UNIT_TYPES[j]) === 0) {
+              unitType = ALL_UNIT_TYPES[j];
+              break;
+            }
+          }
+        }
+
+        columnUnits.push(unitType); // null for non-unit columns (village name, etc.)
+      });
+
+      // Parse each data row
+      $table.find('tbody tr, tr').each(function() {
+        var $row = $(this);
+        var $cells = $row.find('td');
+        if ($cells.length === 0) return; // Skip header rows
+
+        // Find village ID from a link in the row
+        var villageId = 0;
+        $row.find('a[href*="village="]').each(function() {
+          var href = $(this).attr('href') || '';
+          var match = href.match(/village=(\d+)/);
+          if (match) {
+            villageId = parseInt(match[1], 10);
+            return false; // break
+          }
+        });
+        if (villageId === 0) return;
+
+        // Parse troop counts from cells matching columnUnits
+        var troops = {};
+        $cells.each(function(cellIdx) {
+          if (cellIdx < columnUnits.length && columnUnits[cellIdx]) {
+            var val = $(this).text().trim().replace(/\./g, '').replace(/,/g, '');
+            troops[columnUnits[cellIdx]] = parseInt(val, 10) || 0;
+          }
+        });
+
+        // If column mapping didn't work (columnUnits are all null), try a different
+        // approach: cells after the village name cell are troop counts in order
+        var hasAnyUnit = false;
+        for (var k = 0; k < ALL_UNIT_TYPES.length; k++) {
+          if (troops[ALL_UNIT_TYPES[k]] > 0) {
+            hasAnyUnit = true;
+            break;
+          }
+        }
+
+        if (!hasAnyUnit && columnUnits.filter(function(u) { return u !== null; }).length === 0) {
+          // Fallback: assume columns after first cell are unit types in standard order
+          var unitIdx = 0;
+          $cells.each(function(cellIdx) {
+            if (cellIdx === 0) return; // Skip village name cell
+            if (unitIdx < ALL_UNIT_TYPES.length) {
+              var val = $(this).text().trim().replace(/\./g, '').replace(/,/g, '');
+              var num = parseInt(val, 10);
+              if (!isNaN(num)) {
+                troops[ALL_UNIT_TYPES[unitIdx]] = num;
+              }
+              unitIdx++;
+            }
+          });
+        }
+
+        troopMap[villageId] = troops;
+      });
+
+      return troopMap;
+    },
+
+    /**
+     * Fallback troop fetching: fetch individual village scavenge pages sequentially.
+     * Uses /game.php?village={villageId}&screen=place&mode=scavenge to get troop data
+     * from the scavenging form.
+     *
+     * @private
+     * @param {Array.<Object>} villages - Village objects with .id.
+     * @param {function(Object.<number, Object.<string, number>>)} callback -
+     *   Called with merged troopMap when all fetches complete.
+     */
+    _fetchTroopsFallback: function(villages, callback) {
+      var troopMap = {};
+      var queue = villages.slice();
+      var batchDelay = 200; // ms between requests to avoid rate limiting
+
+      var processNext = function() {
+        if (queue.length === 0) {
+          callback(troopMap);
+          return;
+        }
+
+        var village = queue.shift();
+        if (!village.id) {
+          processNext();
+          return;
+        }
+
+        var url = '/game.php?village=' + village.id + '&screen=place&mode=scavenge';
+        $.ajax({
+          url: url,
+          dataType: 'html',
+          success: function(html) {
+            var troops = ScavengeParser._parseSingleVillageTroops(html);
+            if (troops) {
+              troopMap[village.id] = troops;
+            }
+            setTimeout(processNext, batchDelay);
+          },
+          error: function() {
+            setTimeout(processNext, batchDelay);
+          }
+        });
+      };
+
+      processNext();
+    },
+
+    /**
+     * Parse troop counts from a single village scavenge page.
+     * Looks for .units-entry-all elements, scavenging form inputs, or
+     * ScavengeScreen JavaScript data embedded in the page.
+     *
+     * @private
+     * @param {string} html - Raw HTML of the village scavenge page.
+     * @returns {?Object.<string, number>} Troop counts or null if parsing failed.
+     */
+    _parseSingleVillageTroops: function(html) {
+      var $doc = $('<div>').html(html);
+      var troops = {};
+      var found = false;
+
+      // Method 1: .units-entry-all elements (common TW pattern)
+      $doc.find('.units-entry-all').each(function() {
+        var $el = $(this);
+        var unitType = $el.data('unit') || $el.attr('data-unit');
+        var count = parseInt($el.data('all-count') || $el.text().trim().replace(/[()]/g, ''), 10);
+        if (unitType && !isNaN(count)) {
+          troops[unitType] = count;
+          found = true;
+        }
+      });
+      if (found) return troops;
+
+      // Method 2: Scavenging form input fields
+      ALL_UNIT_TYPES.forEach(function(unit) {
+        var $input = $doc.find('input[name="' + unit + '"], input[data-unit="' + unit + '"]');
+        if ($input.length > 0) {
+          // The max or data-all-count attribute often holds total available
+          var max = parseInt($input.attr('data-all-count') || $input.attr('max') || '0', 10);
+          if (max > 0) {
+            troops[unit] = max;
+            found = true;
+          }
+        }
+        // Also check for an "(N)" link showing total available next to the input
+        var $allLink = $doc.find('a[data-unit="' + unit + '"].units-entry-all, ' +
+                                 '.scavenge_unit .unit_link_' + unit);
+        if ($allLink.length > 0) {
+          var val = parseInt($allLink.text().trim().replace(/[()]/g, ''), 10);
+          if (!isNaN(val) && val > 0) {
+            troops[unit] = val;
+            found = true;
+          }
+        }
+      });
+      if (found) return troops;
+
+      // Method 3: Look for ScavengeScreen data in inline scripts
+      var scriptMatch = html.match(/ScavengeScreen\s*\(\s*\{[\s\S]*?"unit_counts_home"\s*:\s*(\{[^}]+\})/);
+      if (scriptMatch) {
+        try {
+          var unitCounts = JSON.parse(scriptMatch[1]);
+          ALL_UNIT_TYPES.forEach(function(unit) {
+            if (unitCounts[unit] !== undefined) {
+              troops[unit] = parseInt(unitCounts[unit], 10) || 0;
+              found = true;
+            }
+          });
+        } catch (e) {
+          // JSON parse failed — ignore
+        }
+      }
+      if (found) return troops;
+
+      return null;
     }
   };
 
@@ -957,23 +1241,96 @@
     },
 
     /**
-     * Load villages for the selected group.
+     * Load villages for the selected group, then fetch troop data.
+     * Flow: parse/fetch village list -> fetch troop counts -> merge -> render.
      * @private
      */
     _loadVillages: function() {
       var self = this;
 
+      /**
+       * After village list is loaded, fetch troop counts and merge them in.
+       * @param {Array.<Object>} villages - Parsed village list (troops may be empty).
+       */
+      var onVillagesLoaded = function(villages) {
+        AppState.villages = villages;
+
+        // Check if any village already has troop data (non-empty troops object)
+        var hasTroopData = villages.some(function(v) {
+          for (var u in v.troops) {
+            if (v.troops.hasOwnProperty(u) && v.troops[u] > 0) return true;
+          }
+          return false;
+        });
+
+        if (hasTroopData || villages.length === 0) {
+          // Troops already parsed from the page or no villages — render immediately
+          self.renderActiveTab();
+          return;
+        }
+
+        // Show loading state with village count but "Loading troops..." in troop column
+        self._renderVillagesLoadingTroops();
+
+        // Fetch troop counts from overview page
+        ScavengeParser.fetchTroopCounts(villages, function(troopMap) {
+          // Merge troop data into village objects
+          villages.forEach(function(v) {
+            if (troopMap[v.id]) {
+              v.troops = troopMap[v.id];
+            }
+          });
+          self.renderActiveTab();
+        });
+      };
+
       if (ScavengeParser.isOnMassScavengePage()) {
-        AppState.villages = ScavengeParser.parseVillageRows(AppState.selectedGroup);
-        self.renderActiveTab();
+        var villages = ScavengeParser.parseVillageRows(AppState.selectedGroup);
+        onVillagesLoaded(villages);
       } else {
         // Show loading state
         self._setTabContent('scavenge', '<div style="text-align:center;padding:40px;color:#8a8070;">Loading village data...</div>');
         ScavengeParser.fetchVillageData(AppState.selectedGroup, function(villages) {
-          AppState.villages = villages;
-          self.renderActiveTab();
+          onVillagesLoaded(villages);
         });
       }
+    },
+
+    /**
+     * Render the village table with a "Loading troops..." indicator in the troops column.
+     * Shown while fetchTroopCounts is in progress.
+     * @private
+     */
+    _renderVillagesLoadingTroops: function() {
+      var html = '<div style="margin-bottom:12px;font-size:12px;color:#a89050;">' +
+                 'Found ' + AppState.villages.length + ' villages. Loading troop data...</div>';
+      html += '<div style="max-height:360px;overflow-y:auto;border:1px solid #3a3a3a;border-radius:4px;">';
+      html += '<table class="twsc-table"><thead><tr>';
+      html += '<th style="width:30px;">&nbsp;</th>';
+      html += '<th>Village</th>';
+      html += '<th>Available Troops</th>';
+      html += '<th>Tiers</th>';
+      html += '</tr></thead><tbody>';
+
+      AppState.villages.forEach(function(v) {
+        html += '<tr>';
+        html += '<td>&nbsp;</td>';
+        html += '<td>';
+        html += '<span class="twsc-village-name">' + UI._esc(v.name || 'Village') + '</span>';
+        if (v.coords) html += ' <span class="twsc-coords">(' + v.coords.x + '|' + v.coords.y + ')</span>';
+        html += '</td>';
+        html += '<td><span style="color:#a89050;font-style:italic;">Loading troops...</span></td>';
+        html += '<td>';
+        for (var ti = 1; ti <= 4; ti++) {
+          var unlocked = v.unlockedTiers.indexOf(ti) !== -1;
+          html += '<span class="twsc-tier-badge' + (unlocked ? '' : ' twsc-tier-locked') + '">' + ti + '</span>';
+        }
+        html += '</td>';
+        html += '</tr>';
+      });
+
+      html += '</tbody></table></div>';
+      this._setTabContent('scavenge', html);
     },
 
     /**
