@@ -280,7 +280,7 @@
      * @private
      */
     function fetchPage() {
-      var url = '/game.php?screen=overview_villages&mode=combined&type=' + viewType + '&page=' + page;
+      var url = '/game.php?screen=overview_villages&mode=units&type=' + viewType + '&page=' + page;
 
       $.ajax({
         url: url,
