@@ -594,6 +594,7 @@
       '    <th>Launch Time</th>',
       '    <th>Countdown</th>',
       '    <th>Status</th>',
+      '    <th>Alarm</th>',
       '    <th></th>',
       '  </tr>',
       '</thead>',
@@ -630,6 +631,10 @@
         '<td style="font-family:monospace;font-size:10px;">' + launchPrefix + launchDisplay + '</td>' +
         '<td class="' + ID_PREFIX + 'countdown" style="font-family:monospace;font-size:10px;font-weight:bold;"></td>' +
         '<td class="' + ID_PREFIX + 'status" style="font-size:10px;font-weight:bold;"></td>' +
+        '<td class="' + ID_PREFIX + 'alarm-cell" data-plan="' + entry.planIdx + '" data-atk="' + entry.attackIdx + '" ' +
+          'style="font-size:9px;white-space:nowrap;">' +
+          getAlarmCellHtml(entry.planIdx, entry.attackIdx, atk.launchTimeMs) +
+        '</td>' +
         '<td style="white-space:nowrap;">' +
           '<a href="' + rallyLink + '" target="_blank" ' +
             'style="font-size:9px;text-decoration:none;" title="Open Rally Point">&#9876; Go</a> ' +
@@ -653,6 +658,110 @@
       var label = $btn.attr('data-label');
       showReminderDialog(label, launchMs);
     });
+
+    // Render active reminders summary below the attack table
+    renderRemindersSummary($container);
+  }
+
+  /**
+   * Get HTML for the Alarm cell of an attack row.
+   * Shows any active reminders for this attack with countdown.
+   * @param {number} planIdx - Plan index.
+   * @param {number} atkIdx - Attack index within the plan.
+   * @param {number} launchMs - Launch time in ms.
+   * @returns {string} HTML for the alarm cell.
+   */
+  function getAlarmCellHtml(planIdx, atkIdx, launchMs) {
+    var reminders = getPlannerReminders();
+    var key = 'planner_' + planIdx + '_' + atkIdx;
+    var matching = [];
+    for (var i = 0; i < reminders.length; i++) {
+      var r = reminders[i];
+      if (r.id && r.id.indexOf('planner_') === 0 && r.label && r.label.indexOf(planIdx + '_' + atkIdx) !== -1) {
+        matching.push(r);
+      }
+    }
+    // Also match by attack label content
+    if (matching.length === 0 && plans[planIdx]) {
+      var atk = plans[planIdx].attacks[atkIdx];
+      if (atk) {
+        var srcName = atk.source ? atk.source.name : '';
+        for (var j = 0; j < reminders.length; j++) {
+          var r2 = reminders[j];
+          if (r2.label && r2.label.indexOf(srcName) !== -1 && !r2.done) {
+            matching.push(r2);
+          }
+        }
+      }
+    }
+    if (matching.length === 0) {
+      return '<span style="color:#ccc;">—</span>';
+    }
+    var parts = [];
+    for (var k = 0; k < matching.length; k++) {
+      var rm = matching[k];
+      var remaining = rm.targetTimeAbsMs - Date.now();
+      if (rm.done || remaining < -60000) continue;
+      var color = remaining <= 0 ? '#cc0000' : (remaining < 30000 ? '#cc8800' : '#2a6a8a');
+      parts.push('<span class="' + ID_PREFIX + 'alarm-countdown" data-target="' + rm.targetTimeAbsMs + '" ' +
+        'style="color:' + color + ';font-weight:bold;">&#9200; ' +
+        (remaining <= 0 ? 'NOW!' : formatCountdown(remaining)) + '</span>');
+    }
+    return parts.length > 0 ? parts.join('<br>') : '<span style="color:#ccc;">—</span>';
+  }
+
+  /**
+   * Get all planner reminders from shared localStorage.
+   * @returns {Array} Array of reminder objects.
+   */
+  function getPlannerReminders() {
+    try {
+      var all = JSON.parse(localStorage.getItem('twr_timers') || '[]');
+      return all.filter(function(r) { return r.id && r.id.indexOf('planner_') === 0; });
+    } catch (e) { return []; }
+  }
+
+  /**
+   * Render a summary of all active planner reminders below the attack table.
+   * @param {jQuery} $container - Container element.
+   */
+  function renderRemindersSummary($container) {
+    // Remove old summary
+    $container.find('.' + ID_PREFIX + 'reminders-summary').remove();
+
+    var reminders = getPlannerReminders().filter(function(r) {
+      return !r.done && r.targetTimeAbsMs > Date.now() - 60000;
+    });
+
+    if (reminders.length === 0) return;
+
+    // Sort by target time (soonest first)
+    reminders.sort(function(a, b) { return a.targetTimeAbsMs - b.targetTimeAbsMs; });
+
+    var html = '<div class="' + ID_PREFIX + 'reminders-summary" style="' +
+      'margin-top:8px;padding:6px 8px;background:#e8f0e0;border:1px solid #8ab060;border-radius:4px;">' +
+      '<div style="font-weight:bold;font-size:10px;color:#3a5a2a;margin-bottom:4px;">&#9200; Active Reminders (' +
+      reminders.length + ')</div>';
+
+    for (var i = 0; i < reminders.length; i++) {
+      var r = reminders[i];
+      var remaining = r.targetTimeAbsMs - Date.now();
+      var color = remaining < 30000 ? '#cc0000' : (remaining < 120000 ? '#cc8800' : '#2a6a2a');
+      var icon = remaining < 30000 ? '&#128276;' : '&#9200;';
+
+      html += '<div class="' + ID_PREFIX + 'reminder-row" data-rid="' + r.id + '" style="' +
+        'display:flex;justify-content:space-between;align-items:center;' +
+        'padding:3px 0;border-bottom:1px solid #d0e0c0;font-size:10px;">' +
+        '<span style="color:#3a3a0a;">' + icon + ' ' + escapeHtml(r.label || 'Reminder') + '</span>' +
+        '<span class="' + ID_PREFIX + 'rem-countdown" data-target="' + r.targetTimeAbsMs + '" ' +
+          'style="font-family:monospace;font-weight:bold;color:' + color + ';">' +
+          (remaining <= 0 ? 'ALERT!' : formatCountdown(remaining)) +
+        '</span>' +
+        '</div>';
+    }
+
+    html += '</div>';
+    $container.append(html);
   }
 
   /**
@@ -747,6 +856,9 @@
 
       var beforeLabel = beforeSec >= 60 ? (Math.floor(beforeSec / 60) + 'm ' + (beforeSec % 60) + 's') : (beforeSec + 's');
       TWTools.UI.toast('Reminder set: ' + beforeLabel + ' before launch', 'success');
+
+      // Re-render so the Alarm column and summary update
+      renderAllPlans();
     };
 
     // Preset buttons
@@ -823,6 +935,48 @@
         }
       }
     }
+
+    // Update reminder countdowns (alarm column + summary panel)
+    updateReminderCountdowns();
+  }
+
+  /**
+   * Update all visible reminder countdowns in the Alarm column and summary panel.
+   * Called every 50ms from the main update loop.
+   */
+  function updateReminderCountdowns() {
+    var now = Date.now();
+
+    // Update alarm cells in table rows
+    $('.' + ID_PREFIX + 'alarm-countdown').each(function() {
+      var $el = $(this);
+      var target = parseFloat($el.attr('data-target'));
+      var remaining = target - now;
+      var color = remaining <= 0 ? '#cc0000' : (remaining < 30000 ? '#cc8800' : '#2a6a8a');
+      $el.css('color', color);
+      if (remaining <= 0) {
+        $el.html('&#128276; NOW!');
+        // Blink effect
+        if (Math.floor(now / 400) % 2 === 0) {
+          $el.css('visibility', 'visible');
+        } else {
+          $el.css('visibility', 'hidden');
+        }
+      } else {
+        $el.css('visibility', 'visible');
+        $el.html('&#9200; ' + formatCountdown(remaining));
+      }
+    });
+
+    // Update summary panel countdowns
+    $('.' + ID_PREFIX + 'rem-countdown').each(function() {
+      var $el = $(this);
+      var target = parseFloat($el.attr('data-target'));
+      var remaining = target - now;
+      var color = remaining <= 0 ? '#cc0000' : (remaining < 30000 ? '#cc8800' : '#2a6a2a');
+      $el.css('color', color);
+      $el.text(remaining <= 0 ? 'ALERT!' : formatCountdown(remaining));
+    });
   }
 
   /**
