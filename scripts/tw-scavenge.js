@@ -1033,14 +1033,17 @@
     buildSquadPayload: function(villageId, squads) {
       return squads.map(function(sq) {
         var units = {};
+        var carryMax = 0;
         ALL_UNIT_TYPES.forEach(function(u) {
           if (sq.troops[u] && sq.troops[u] > 0) {
             units[u] = sq.troops[u];
+            carryMax += sq.troops[u] * (UNIT_HAUL[u] || 0);
           }
         });
         return {
           village_id: villageId,
           candidate_squad: units,
+          carry_max: carryMax,
           option_id: sq.tier
         };
       });
@@ -1071,7 +1074,7 @@
     /**
      * Send all squads for checked villages.
      * Sends one request per squad (each squad = one tier for one village).
-     * @param {Object[]} allSquads - Array of squad payloads (village_id, candidate_squad, option_id).
+     * @param {Object[]} allSquads - Array of squad payloads (village_id, candidate_squad, carry_max, option_id).
      * @param {function(Object)} onProgress - Progress callback.
      * @param {function(Object)} onComplete - Completion callback.
      */
@@ -1126,124 +1129,65 @@
 
     /**
      * Send a single scavenge squad to the TW API.
-     * Uses the game's native form submission format with squad_requests array.
-     * option_id is 0-indexed internally (tier 1 = option_id 0, tier 4 = option_id 3).
-     * Tries multiple ajaxaction variants for compatibility across TW versions.
+     * Uses the verified scavenge_api endpoint with URL-encoded form data.
+     * Format: squad_requests[0][village_id], squad_requests[0][candidate_squad][unit_counts][unit],
+     * squad_requests[0][candidate_squad][carry_max], squad_requests[0][option_id] (1-indexed),
+     * squad_requests[0][use_premium], h (CSRF in body).
      * @private
-     * @param {Object} squad - Squad payload: { village_id, candidate_squad, option_id (1-indexed tier) }.
+     * @param {Object} squad - Squad payload: { village_id, candidate_squad, carry_max, option_id (1-indexed tier) }.
      * @param {function(boolean)} callback - Called with true on success, false on error.
      */
     _sendSingleSquad: function(squad, callback) {
       var villageId = squad.village_id;
       var csrf = TWTools.getCsrf();
-      var tierNumber = squad.option_id; // 1-indexed from buildSquadPayload
-      var optIdx = tierNumber - 1;      // 0-indexed for the API
+      var optionId = squad.option_id; // Already 1-indexed from buildSquadPayload
 
-      console.log('[TW-Scavenge] Sending squad: village=' + villageId +
-                  ', tier=' + tierNumber + ' (optIdx=' + optIdx + ')',
-                  squad.candidate_squad);
-
-      // Build form data matching the game's native scavenge form structure
-      var data = {};
-      data['squad_requests[' + optIdx + '][village_id]'] = villageId;
-      data['squad_requests[' + optIdx + '][option_id]'] = optIdx;
+      // Build URL-encoded form data matching the verified TW scavenge API format
+      var parts = [];
+      parts.push('squad_requests%5B0%5D%5Bvillage_id%5D=' + villageId);
 
       var units = squad.candidate_squad || {};
       for (var unit in units) {
         if (units.hasOwnProperty(unit) && units[unit] > 0) {
-          data['squad_requests[' + optIdx + '][candidate_squad][' + unit + ']'] = units[unit];
+          parts.push('squad_requests%5B0%5D%5Bcandidate_squad%5D%5Bunit_counts%5D%5B' + unit + '%5D=' + units[unit]);
         }
       }
 
-      // Strategy 1: ajaxaction=send_squads (plural) in URL
-      var url1 = '/game.php?village=' + villageId +
-                 '&screen=place&mode=scavenge&ajaxaction=send_squads&h=' + csrf;
+      parts.push('squad_requests%5B0%5D%5Bcandidate_squad%5D%5Bcarry_max%5D=' + (squad.carry_max || 0));
+      parts.push('squad_requests%5B0%5D%5Boption_id%5D=' + optionId);
+      parts.push('squad_requests%5B0%5D%5Buse_premium%5D=false');
+      parts.push('h=' + encodeURIComponent(csrf));
 
-      console.log('[TW-Scavenge] Strategy 1: POST ' + url1, data);
+      var data = parts.join('&');
 
-      $.ajax({
-        url: url1,
-        type: 'POST',
-        data: data,
-        dataType: 'json',
-        success: function(response) {
-          console.log('[TW-Scavenge] Strategy 1 response:', response);
-          if (response && !response.error) {
-            callback(true);
-          } else {
-            console.warn('[TW-Scavenge] Strategy 1 returned error, trying strategy 2...',
-                         response ? response.error : 'no response');
-            // Strategy 2: ajaxaction=send_squad (singular) in URL
-            var url2 = '/game.php?village=' + villageId +
-                       '&screen=place&mode=scavenge&ajaxaction=send_squad&h=' + csrf;
+      // Use scavenge_api endpoint with ajaxaction=send_squads
+      var gameBase = window.location.origin;
+      var url = gameBase + '/game.php?village=' + villageId + '&screen=scavenge_api&ajaxaction=send_squads';
 
-            console.log('[TW-Scavenge] Strategy 2: POST ' + url2, data);
+      console.log('[TW-Scavenge] Sending squad: village=' + villageId +
+                  ', tier=' + optionId + ', carry_max=' + (squad.carry_max || 0));
 
-            $.ajax({
-              url: url2,
-              type: 'POST',
-              data: data,
-              dataType: 'json',
-              success: function(response2) {
-                console.log('[TW-Scavenge] Strategy 2 response:', response2);
-                if (response2 && !response2.error) {
-                  callback(true);
-                } else {
-                  console.warn('[TW-Scavenge] Strategy 2 returned error, trying strategy 3...',
-                               response2 ? response2.error : 'no response');
-                  // Strategy 3: ajaxaction in POST data instead of URL
-                  var url3 = '/game.php?village=' + villageId +
-                             '&screen=place&mode=scavenge&h=' + csrf;
-                  var data3 = $.extend({}, data, { ajaxaction: 'send_squads' });
-
-                  console.log('[TW-Scavenge] Strategy 3: POST ' + url3, data3);
-
-                  $.ajax({
-                    url: url3,
-                    type: 'POST',
-                    data: data3,
-                    dataType: 'json',
-                    success: function(response3) {
-                      console.log('[TW-Scavenge] Strategy 3 response:', response3);
-                      callback(!response3 || !response3.error);
-                    },
-                    error: function(xhr3) {
-                      console.error('[TW-Scavenge] Strategy 3 failed:', xhr3.status, xhr3.statusText);
-                      callback(false);
-                    }
-                  });
-                }
-              },
-              error: function(xhr2) {
-                console.error('[TW-Scavenge] Strategy 2 failed:', xhr2.status, xhr2.statusText);
-                callback(false);
-              }
-            });
-          }
-        },
-        error: function(xhr1) {
-          console.error('[TW-Scavenge] Strategy 1 failed:', xhr1.status, xhr1.statusText);
-          // On network error, try strategy 2 directly
-          var url2 = '/game.php?village=' + villageId +
-                     '&screen=place&mode=scavenge&ajaxaction=send_squad&h=' + csrf;
-
-          $.ajax({
-            url: url2,
-            type: 'POST',
-            data: data,
-            dataType: 'json',
-            success: function(response2) {
-              console.log('[TW-Scavenge] Strategy 2 (fallback) response:', response2);
-              callback(!response2 || !response2.error);
-            },
-            error: function(xhr2) {
-              console.error('[TW-Scavenge] All strategies failed for village=' + villageId +
-                            ', tier=' + tierNumber);
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', url);
+      xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+      xhr.onreadystatechange = function() {
+        if (xhr.readyState === XMLHttpRequest.DONE) {
+          if (xhr.status === 200) {
+            try {
+              var response = JSON.parse(xhr.responseText);
+              console.log('[TW-Scavenge] Response:', response);
+              callback(!response.error);
+            } catch (e) {
+              console.log('[TW-Scavenge] Parse error, raw:', xhr.responseText);
               callback(false);
             }
-          });
+          } else {
+            console.log('[TW-Scavenge] HTTP error:', xhr.status);
+            callback(false);
+          }
         }
-      });
+      };
+      xhr.send(data);
     },
 
     /**

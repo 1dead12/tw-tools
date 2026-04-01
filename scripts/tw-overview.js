@@ -9,7 +9,7 @@
  * - BBCode and CSV export
  * - NEVER auto-sends anything
  *
- * @version 1.0.0
+ * @version 1.1.0
  * @requires jQuery, TribalWars game environment, window.TWTools (tw-core.js, tw-ui.js)
  */
 ;(function(window, $) {
@@ -29,7 +29,7 @@
   // CONFIG & CONSTANTS
   // ============================================================
 
-  var VERSION = '1.0.0';
+  var VERSION = '1.1.0';
   var ID_PREFIX = 'two-';
   var STORAGE_PREFIX = 'two_';
 
@@ -89,6 +89,19 @@
     OTHER: 'other'
   };
 
+  /**
+   * Available troop overview view types.
+   * Each entry maps a value (used in the URL type= param) to a display label.
+   * @type {Array.<{value: string, label: string}>}
+   */
+  var VIEW_TYPES = [
+    { value: 'own_home', label: 'Own (home)' },
+    { value: 'own_all', label: 'Own (all)' },
+    { value: 'in_village', label: 'In village' },
+    { value: 'outside', label: 'Outside' },
+    { value: 'in_transit', label: 'In transit' }
+  ];
+
   /** Default settings */
   var DEFAULT_SETTINGS = {
     includeArchers: false,
@@ -96,6 +109,9 @@
     autoRefreshInterval: 0,
     exportFormat: 'bbcode'
   };
+
+  /** @type {string} Currently selected view type for troops overview */
+  var currentViewType = 'own_home';
 
   // ============================================================
   // STORAGE (wraps TWTools.Storage with local prefix)
@@ -155,6 +171,10 @@
   function loadSettings() {
     var saved = Store.get('settings', null);
     settings = $.extend(true, {}, DEFAULT_SETTINGS, saved || {});
+
+    // Load persisted view type
+    var savedView = Store.get('view_type', 'own_home');
+    currentViewType = savedView || 'own_home';
   }
 
   /**
@@ -170,6 +190,19 @@
    */
   function getActiveUnits() {
     return settings.includeArchers ? ALL_UNITS : UNITS_NO_ARCHERS;
+  }
+
+  /**
+   * Get the display label for the currently selected view type.
+   * @returns {string} View type label.
+   */
+  function getViewLabel() {
+    for (var i = 0; i < VIEW_TYPES.length; i++) {
+      if (VIEW_TYPES[i].value === currentViewType) {
+        return VIEW_TYPES[i].label;
+      }
+    }
+    return 'Own (home)';
   }
 
   // ============================================================
@@ -219,8 +252,11 @@
    * @param {function(string)} statusCb - Status update callback.
    */
   function fetchTroopData(callback, statusCb) {
+    // Cache key includes view type so different views are cached independently
+    var cacheKey = 'troop_data_' + currentViewType;
+
     // Check cache first
-    var cached = Store.getCache('troop_data');
+    var cached = Store.getCache(cacheKey);
     if (cached && cached.length > 0) {
       troopData = cached;
       callback(cached);
@@ -233,17 +269,18 @@
     }
 
     isFetching = true;
-    if (statusCb) statusCb('Fetching troop overview...');
+    if (statusCb) statusCb('Fetching troop overview (' + getViewLabel() + ')...');
 
     var allTroops = [];
     var page = 0;
+    var viewType = currentViewType;
 
     /**
      * Fetch a single page of the combined overview.
      * @private
      */
     function fetchPage() {
-      var url = '/game.php?screen=overview_villages&mode=combined&type=own_home&page=' + page;
+      var url = '/game.php?screen=overview_villages&mode=combined&type=' + viewType + '&page=' + page;
 
       $.ajax({
         url: url,
@@ -265,7 +302,7 @@
             // Done fetching all pages
             isFetching = false;
             troopData = allTroops;
-            Store.setCache('troop_data', allTroops, CACHE_TTL);
+            Store.setCache(cacheKey, allTroops, CACHE_TTL);
             callback(allTroops);
           }
         },
@@ -792,11 +829,38 @@
   function renderTroops($panel, data) {
     $panel.empty();
 
+    // Build view selector dropdown HTML (reused in both states)
+    var viewSelectHtml = '<label style="font-size:10px;margin-left:8px;">View: ' +
+      '<select id="' + ID_PREFIX + 'view-type" style="font-size:10px;">';
+    for (var vi = 0; vi < VIEW_TYPES.length; vi++) {
+      viewSelectHtml += '<option value="' + VIEW_TYPES[vi].value + '"' +
+        (currentViewType === VIEW_TYPES[vi].value ? ' selected' : '') + '>' +
+        VIEW_TYPES[vi].label + '</option>';
+    }
+    viewSelectHtml += '</select></label>';
+
+    /**
+     * Bind the view selector change event.
+     * Clears cache for the old view type, updates currentViewType, persists, and re-fetches.
+     * @param {jQuery} $container - Panel containing the selector.
+     * @private
+     */
+    function bindViewSelector($container) {
+      $container.on('change', '#' + ID_PREFIX + 'view-type', function() {
+        currentViewType = $(this).val();
+        Store.set('view_type', currentViewType);
+        // Clear old troop data and re-fetch with new view type
+        troopData = [];
+        fetchTroopDataWithUI($container, true);
+      });
+    }
+
     if (!data || data.length === 0) {
       $panel.html(
         '<div style="padding:8px;">' +
         '<button class="btn" id="' + ID_PREFIX + 'fetch-troops" style="margin-bottom:8px;">Fetch Troops</button> ' +
         '<button class="btn" id="' + ID_PREFIX + 'refresh-troops" style="margin-bottom:8px;">Force Refresh</button>' +
+        viewSelectHtml +
         '<p style="color:#7a6840;">No troop data. Click "Fetch Troops" to load.</p>' +
         '</div>'
       );
@@ -808,6 +872,7 @@
       $panel.on('click', '#' + ID_PREFIX + 'refresh-troops', function() {
         fetchTroopDataWithUI($panel, true);
       });
+      bindViewSelector($panel);
       return;
     }
 
@@ -825,13 +890,14 @@
     // Toolbar
     var html = '<div style="margin-bottom:4px;">' +
       '<button class="btn" id="' + ID_PREFIX + 'fetch-troops" style="font-size:9px;">Refresh</button> ' +
+      viewSelectHtml + ' ' +
       '<button class="btn" id="' + ID_PREFIX + 'export-bbcode" style="font-size:9px;">BBCode</button> ' +
       '<button class="btn" id="' + ID_PREFIX + 'export-csv" style="font-size:9px;">CSV</button>' +
       '</div>';
 
     // Army summary box
     html += '<div style="margin-bottom:6px;padding:4px;background:#f0e0b0;border:1px solid #c0a060;border-radius:2px;">' +
-      '<b>Army Summary</b><br/>' +
+      '<b>Army Summary</b> <span style="font-size:9px;color:#7a6840;">(' + escapeHtml(getViewLabel()) + ')</span><br/>' +
       'Offensive Power: <span style="color:#cc0000;font-weight:bold;">' + formatNum(summary.offPower) + '</span> &nbsp;|&nbsp; ' +
       'Defensive Power: <span style="color:#2e7d32;font-weight:bold;">' + formatNum(summary.defPower) + '</span><br/>' +
       'Nukes (' + settings.nukeThreshold + '+ off): <span style="font-weight:bold;">' + summary.nukeCount + '</span> &nbsp;|&nbsp; ' +
@@ -906,6 +972,9 @@
     $panel.on('click', '#' + ID_PREFIX + 'export-csv', function() {
       exportCSV(data);
     });
+
+    // Bind view selector
+    bindViewSelector($panel);
   }
 
   /**
@@ -915,7 +984,7 @@
    */
   function fetchTroopDataWithUI($panel, force) {
     if (force) {
-      TWTools.Storage.remove(STORAGE_PREFIX + 'troop_data');
+      TWTools.Storage.remove(STORAGE_PREFIX + 'troop_data_' + currentViewType);
       troopData = [];
     }
 
@@ -1152,7 +1221,10 @@
 
     // Bind clear cache
     $panel.on('click', '#' + ID_PREFIX + 'clear-cache', function() {
-      TWTools.Storage.remove(STORAGE_PREFIX + 'troop_data');
+      // Clear all view type caches
+      for (var ci = 0; ci < VIEW_TYPES.length; ci++) {
+        TWTools.Storage.remove(STORAGE_PREFIX + 'troop_data_' + VIEW_TYPES[ci].value);
+      }
       TWTools.Storage.remove(STORAGE_PREFIX + 'command_data');
       troopData = [];
       commandData = [];
@@ -1192,7 +1264,7 @@
     var totals = calculateTroopTotals(data);
     var summary = calculateArmySummary(data);
 
-    var bb = '[b]Troop Overview[/b] (' + data.length + ' villages)\n\n';
+    var bb = '[b]Troop Overview[/b] (' + data.length + ' villages, ' + getViewLabel() + ')\n\n';
 
     // Summary
     bb += '[b]Army Summary:[/b]\n';
@@ -1200,32 +1272,39 @@
     bb += 'Defensive Power: ' + formatNum(summary.defPower) + '\n';
     bb += 'Nukes: ' + summary.nukeCount + ' | Noble Trains: ' + summary.nobleTrains + '\n\n';
 
-    // Table
+    // Table — TW BBCode format:
+    //   [**]Header1[||]Header2[||]Header3[/**]
+    //   [*]Cell1[|]Cell2[|]Cell3[/*]
     bb += '[table]\n';
 
-    // Header
-    bb += '[**]Village[||]';
+    // Header row
+    var headerCells = ['Village'];
     for (var h = 0; h < units.length; h++) {
-      bb += unitShortName(units[h]) + '[||]';
+      headerCells.push(unitShortName(units[h]));
     }
-    bb += 'Total[/**]\n';
+    headerCells.push('Total');
+    bb += '[**]' + headerCells.join('[||]') + '[/**]\n';
 
-    // Data rows
+    // Data rows — replace 0 with "-" for readability
     for (var i = 0; i < data.length; i++) {
       var v = data[i];
-      bb += '[*]' + v.name + ' (' + v.coords + ')[|]';
+      var rowCells = [v.name + ' (' + v.coords + ')'];
       for (var u = 0; u < units.length; u++) {
-        bb += (v.units[units[u]] || 0) + '[|]';
+        var count = v.units[units[u]] || 0;
+        rowCells.push(count > 0 ? String(count) : '-');
       }
-      bb += v.total + '[/*]\n';
+      rowCells.push(String(v.total));
+      bb += '[*]' + rowCells.join('[|]') + '[/*]\n';
     }
 
-    // Totals
-    bb += '[*][b]TOTAL[/b][|]';
+    // Totals row
+    var totalCells = ['[b]TOTAL[/b]'];
     for (var t = 0; t < units.length; t++) {
-      bb += '[b]' + (totals[units[t]] || 0) + '[/b][|]';
+      totalCells.push('[b]' + formatNum(totals[units[t]] || 0) + '[/b]');
     }
-    bb += '[b]' + (totals.total || 0) + '[/b][/*]\n';
+    totalCells.push('[b]' + formatNum(totals.total || 0) + '[/b]');
+    bb += '[*]' + totalCells.join('[|]') + '[/*]\n';
+
     bb += '[/table]';
 
     copyToClipboard(bb);
@@ -1352,8 +1431,8 @@
     // Initial render — troops tab
     var $troopsPanel = card.getTabContent('troops');
 
-    // Try to load cached data
-    var cachedTroops = Store.getCache('troop_data');
+    // Try to load cached data for current view type
+    var cachedTroops = Store.getCache('troop_data_' + currentViewType);
     if (cachedTroops && cachedTroops.length > 0) {
       troopData = cachedTroops;
       // Recalculate nuke status with current settings
@@ -1388,7 +1467,7 @@
     if (settings.autoRefreshInterval > 0) {
       autoRefreshTimer = setInterval(function() {
         // Clear caches and re-fetch
-        TWTools.Storage.remove(STORAGE_PREFIX + 'troop_data');
+        TWTools.Storage.remove(STORAGE_PREFIX + 'troop_data_' + currentViewType);
         TWTools.Storage.remove(STORAGE_PREFIX + 'command_data');
 
         fetchTroopData(function(data) {
