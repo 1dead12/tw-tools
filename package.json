@@ -1,14 +1,13 @@
 {
   "name": "tw-tools",
   "version": "2.1.0",
-  "description": "Tribal Wars script suite — 7 tools: snipe, scavenge, planner, overview, map-tools, reminders, clock",
+  "description": "Tribal Wars script suite — 6 tools: snipe, scavenge, planner, overview, map-tools, clock",
   "scripts": {
     "build": "node build.js",
     "build:snipe": "node build.js --only=tw-snipe",
     "build:scavenge": "node build.js --only=tw-scavenge",
     "build:clock": "node build.js --only=tw-clock",
     "build:planner": "node build.js --only=tw-planner",
-    "build:reminder": "node build.js --only=tw-reminder",
     "build:overview": "node build.js --only=tw-overview",
     "build:map-tools": "node build.js --only=tw-map-tools"
   },

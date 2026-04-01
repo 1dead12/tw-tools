@@ -1126,43 +1126,122 @@
 
     /**
      * Send a single scavenge squad to the TW API.
-     * Builds form-encoded data matching the game's native format.
+     * Uses the game's native form submission format with squad_requests array.
+     * option_id is 0-indexed internally (tier 1 = option_id 0, tier 4 = option_id 3).
+     * Tries multiple ajaxaction variants for compatibility across TW versions.
      * @private
-     * @param {Object} squad - Squad payload: { village_id, candidate_squad, option_id }.
+     * @param {Object} squad - Squad payload: { village_id, candidate_squad, option_id (1-indexed tier) }.
      * @param {function(boolean)} callback - Called with true on success, false on error.
      */
     _sendSingleSquad: function(squad, callback) {
       var villageId = squad.village_id;
       var csrf = TWTools.getCsrf();
+      var tierNumber = squad.option_id; // 1-indexed from buildSquadPayload
+      var optIdx = tierNumber - 1;      // 0-indexed for the API
 
-      // Build form data matching TW native scavenge format:
-      // squad_requests[0][village_id]=XXX
-      // squad_requests[0][candidate_squad][spear]=N
-      // squad_requests[0][option_id]=1
-      var formData = {};
-      formData['squad_requests[0][village_id]'] = villageId;
-      formData['squad_requests[0][option_id]'] = squad.option_id;
+      console.log('[TW-Scavenge] Sending squad: village=' + villageId +
+                  ', tier=' + tierNumber + ' (optIdx=' + optIdx + ')',
+                  squad.candidate_squad);
+
+      // Build form data matching the game's native scavenge form structure
+      var data = {};
+      data['squad_requests[' + optIdx + '][village_id]'] = villageId;
+      data['squad_requests[' + optIdx + '][option_id]'] = optIdx;
 
       var units = squad.candidate_squad || {};
       for (var unit in units) {
         if (units.hasOwnProperty(unit) && units[unit] > 0) {
-          formData['squad_requests[0][candidate_squad][' + unit + ']'] = units[unit];
+          data['squad_requests[' + optIdx + '][candidate_squad][' + unit + ']'] = units[unit];
         }
       }
 
-      var url = '/game.php?village=' + villageId +
-                '&screen=place&mode=scavenge&ajaxaction=send_squad&h=' + csrf;
+      // Strategy 1: ajaxaction=send_squads (plural) in URL
+      var url1 = '/game.php?village=' + villageId +
+                 '&screen=place&mode=scavenge&ajaxaction=send_squads&h=' + csrf;
+
+      console.log('[TW-Scavenge] Strategy 1: POST ' + url1, data);
 
       $.ajax({
-        url: url,
+        url: url1,
         type: 'POST',
-        data: formData,
+        data: data,
         dataType: 'json',
         success: function(response) {
-          callback(!response || !response.error);
+          console.log('[TW-Scavenge] Strategy 1 response:', response);
+          if (response && !response.error) {
+            callback(true);
+          } else {
+            console.warn('[TW-Scavenge] Strategy 1 returned error, trying strategy 2...',
+                         response ? response.error : 'no response');
+            // Strategy 2: ajaxaction=send_squad (singular) in URL
+            var url2 = '/game.php?village=' + villageId +
+                       '&screen=place&mode=scavenge&ajaxaction=send_squad&h=' + csrf;
+
+            console.log('[TW-Scavenge] Strategy 2: POST ' + url2, data);
+
+            $.ajax({
+              url: url2,
+              type: 'POST',
+              data: data,
+              dataType: 'json',
+              success: function(response2) {
+                console.log('[TW-Scavenge] Strategy 2 response:', response2);
+                if (response2 && !response2.error) {
+                  callback(true);
+                } else {
+                  console.warn('[TW-Scavenge] Strategy 2 returned error, trying strategy 3...',
+                               response2 ? response2.error : 'no response');
+                  // Strategy 3: ajaxaction in POST data instead of URL
+                  var url3 = '/game.php?village=' + villageId +
+                             '&screen=place&mode=scavenge&h=' + csrf;
+                  var data3 = $.extend({}, data, { ajaxaction: 'send_squads' });
+
+                  console.log('[TW-Scavenge] Strategy 3: POST ' + url3, data3);
+
+                  $.ajax({
+                    url: url3,
+                    type: 'POST',
+                    data: data3,
+                    dataType: 'json',
+                    success: function(response3) {
+                      console.log('[TW-Scavenge] Strategy 3 response:', response3);
+                      callback(!response3 || !response3.error);
+                    },
+                    error: function(xhr3) {
+                      console.error('[TW-Scavenge] Strategy 3 failed:', xhr3.status, xhr3.statusText);
+                      callback(false);
+                    }
+                  });
+                }
+              },
+              error: function(xhr2) {
+                console.error('[TW-Scavenge] Strategy 2 failed:', xhr2.status, xhr2.statusText);
+                callback(false);
+              }
+            });
+          }
         },
-        error: function() {
-          callback(false);
+        error: function(xhr1) {
+          console.error('[TW-Scavenge] Strategy 1 failed:', xhr1.status, xhr1.statusText);
+          // On network error, try strategy 2 directly
+          var url2 = '/game.php?village=' + villageId +
+                     '&screen=place&mode=scavenge&ajaxaction=send_squad&h=' + csrf;
+
+          $.ajax({
+            url: url2,
+            type: 'POST',
+            data: data,
+            dataType: 'json',
+            success: function(response2) {
+              console.log('[TW-Scavenge] Strategy 2 (fallback) response:', response2);
+              callback(!response2 || !response2.error);
+            },
+            error: function(xhr2) {
+              console.error('[TW-Scavenge] All strategies failed for village=' + villageId +
+                            ', tier=' + tierNumber);
+              callback(false);
+            }
+          });
         }
       });
     },

@@ -778,26 +778,6 @@
           '</div>' +
           '<textarea id="' + ID_PREFIX + 'coord-output" readonly style="width:100%;height:80px;margin-top:4px;' +
             'font-size:10px;font-family:monospace;border:1px solid #c0a060;background:#fff8e8;resize:vertical;"></textarea>' +
-        '</div>' +
-
-        '<hr style="border-color:#c0a060;margin:8px 0;">' +
-
-        '<div>' +
-          '<b style="font-size:11px;">Distance Ruler</b><br>' +
-          '<span style="font-size:10px;color:#7a6840;">Enter two coordinates to calculate distance and travel times.</span><br>' +
-          '<table style="width:100%;font-size:10px;margin-top:4px;">' +
-            '<tr>' +
-              '<td>From:</td>' +
-              '<td>' + buildInput('ruler-from', 'text', '', {placeholder: '500|500', style: 'width:80px;padding:1px 3px;font-size:10px;border:1px solid #c0a060;background:#fff8e8;'}) +
-              ' ' + buildButton('ruler-use-current', 'Current') + '</td>' +
-            '</tr>' +
-            '<tr>' +
-              '<td>To:</td>' +
-              '<td>' + buildInput('ruler-to', 'text', '', {placeholder: '510|490', style: 'width:80px;padding:1px 3px;font-size:10px;border:1px solid #c0a060;background:#fff8e8;'}) + '</td>' +
-            '</tr>' +
-          '</table>' +
-          buildButton('ruler-calc', 'Calculate') +
-          '<div id="' + ID_PREFIX + 'ruler-result" style="margin-top:4px;font-size:10px;"></div>' +
         '</div>';
 
       $panel.html(html);
@@ -841,28 +821,17 @@
           TWTools.UI.toast('No coordinates to copy', 'warning');
         }
       });
-
-      $panel.on('click', '#' + ID_PREFIX + 'ruler-use-current', function() {
-        var coords = getCurrentVillageCoords();
-        if (coords) {
-          $('#' + ID_PREFIX + 'ruler-from').val(coords.x + '|' + coords.y);
-        }
-      });
-
-      $panel.on('click', '#' + ID_PREFIX + 'ruler-calc', function() {
-        self._calculateDistance($panel);
-      });
     },
 
     /**
      * Start capturing map clicks.
-     * Intercepts TWMap click handler to capture coordinates.
+     * Hooks into the map container to capture coordinates from click position.
      * @private
      */
     _startCapture: function() {
       this._capturing = true;
 
-      if (typeof TWMap === 'undefined' || !TWMap.map) {
+      if (typeof TWMap === 'undefined') {
         TWTools.UI.toast('Map not available — capture works only on map page', 'warning');
         this._capturing = false;
         return;
@@ -870,37 +839,48 @@
 
       var self = this;
 
-      // Store original handler and intercept clicks
-      if (TWMap.map._handleClick && !this._origClickHandler) {
-        this._origClickHandler = TWMap.map._handleClick;
-      }
-
-      // Add a click listener on the map canvas
-      var mapEl = document.getElementById('map_container') || document.getElementById('map');
+      // Find the map element — TW uses #map_big as the main map viewport,
+      // falling back to #map_container or the first canvas inside #map
+      var mapEl = document.getElementById('map_big') ||
+                  document.getElementById('map_container') ||
+                  document.querySelector('#map canvas') ||
+                  document.getElementById('map');
       if (mapEl) {
+        this._captureMapEl = mapEl;
         this._mapClickListener = function(e) {
           if (!self._capturing) return;
 
-          // Calculate map coordinates from click position
-          // TWMap exposes map coordinates via TWMap.map.coordByEvent or similar
-          var coords = null;
+          // Prevent the default map click behaviour (e.g. opening village info)
+          e.stopPropagation();
+          e.preventDefault();
 
-          if (TWMap.map && typeof TWMap.map.coordByEvent === 'function') {
-            coords = TWMap.map.coordByEvent(e);
-          } else if (TWMap.map && TWMap.map.handler && typeof TWMap.map.handler.coordByEvent === 'function') {
-            coords = TWMap.map.handler.coordByEvent(e);
+          // Calculate map coordinates from the click position.
+          // TWMap.pos contains the current map-center [x, y].
+          // The field size in pixels depends on the zoom level.
+          var fieldSize = 53; // default TW field pixel size
+          if (TWMap.map && TWMap.map.scale && TWMap.map.zoom !== undefined) {
+            fieldSize = TWMap.map.scale[TWMap.map.zoom] || 53;
           }
 
-          if (coords && coords.x && coords.y) {
-            // Round to integer coordinates
-            var cx = Math.floor(coords.x);
-            var cy = Math.floor(coords.y);
-            self._toggleCoord(cx, cy);
+          var rect = mapEl.getBoundingClientRect();
+          var pixelX = e.clientX - rect.left;
+          var pixelY = e.clientY - rect.top;
+
+          var centerX = 500;
+          var centerY = 500;
+          if (TWMap.pos) {
+            centerX = TWMap.pos[0];
+            centerY = TWMap.pos[1];
           }
+
+          var cx = Math.floor(centerX + (pixelX - rect.width / 2) / fieldSize);
+          var cy = Math.floor(centerY + (pixelY - rect.height / 2) / fieldSize);
+
+          self._toggleCoord(cx, cy);
         };
 
-        mapEl.addEventListener('dblclick', this._mapClickListener, true);
-        TWTools.UI.toast('Capture mode ON — double-click map to collect coords', 'success');
+        mapEl.addEventListener('click', this._mapClickListener, true);
+        TWTools.UI.toast('Capture mode ON — click map to collect coords', 'success');
       } else {
         TWTools.UI.toast('Cannot find map element — capture unavailable', 'warning');
         this._capturing = false;
@@ -914,11 +894,16 @@
     _stopCapture: function() {
       this._capturing = false;
 
-      var mapEl = document.getElementById('map_container') || document.getElementById('map');
+      var mapEl = this._captureMapEl ||
+                  document.getElementById('map_big') ||
+                  document.getElementById('map_container') ||
+                  document.querySelector('#map canvas') ||
+                  document.getElementById('map');
       if (mapEl && this._mapClickListener) {
-        mapEl.removeEventListener('dblclick', this._mapClickListener, true);
+        mapEl.removeEventListener('click', this._mapClickListener, true);
         this._mapClickListener = null;
       }
+      this._captureMapEl = null;
 
       TWTools.UI.toast('Capture mode OFF', 'success');
     },
@@ -975,62 +960,6 @@
       }
 
       $output.val(lines.join('\n'));
-    },
-
-    /**
-     * Calculate distance and travel times between two coords.
-     * @param {jQuery} $panel - Tab panel.
-     * @private
-     */
-    _calculateDistance: function($panel) {
-      var $result = $panel.find('#' + ID_PREFIX + 'ruler-result');
-
-      var fromStr = $('#' + ID_PREFIX + 'ruler-from').val();
-      var toStr = $('#' + ID_PREFIX + 'ruler-to').val();
-
-      var from = TWTools.parseCoords(fromStr);
-      var to = TWTools.parseCoords(toStr);
-
-      if (!from || !to) {
-        $result.html('<span style="color:#a02020;">Invalid coordinates. Use format: 500|500</span>');
-        return;
-      }
-
-      var dist = TWTools.distance(from, to);
-
-      $result.html('<b>Distance:</b> ' + dist.toFixed(2) + ' fields<br><br>Loading travel times...');
-
-      // Fetch world config and unit info for accurate travel times
-      TWTools.DataFetcher.fetchWorldConfig(function(config) {
-        TWTools.DataFetcher.fetchUnitInfo(function(unitSpeeds) {
-          var worldSpeed = config.speed || 1;
-          var unitSpeedFactor = config.unitSpeed || 1;
-
-          var table = '<b>Distance:</b> ' + dist.toFixed(2) + ' fields<br>' +
-            '<b>From:</b> ' + from.x + '|' + from.y + ' <b>To:</b> ' + to.x + '|' + to.y + '<br><br>' +
-            '<table class="vis" style="width:100%;">' +
-            '<tr><th>Unit</th><th>Speed</th><th>Travel Time</th></tr>';
-
-          var unitKeys = Object.keys(UNIT_DISPLAY_NAMES);
-          for (var i = 0; i < unitKeys.length; i++) {
-            var unit = unitKeys[i];
-            var speed = unitSpeeds[unit] || TWTools.DEFAULT_UNIT_SPEEDS[unit];
-            if (!speed) continue;
-
-            var travelMs = TWTools.travelTime(dist, speed, worldSpeed, unitSpeedFactor);
-            var travelStr = TWTools.formatTimeSec(travelMs);
-
-            table += '<tr>' +
-              '<td>' + UNIT_DISPLAY_NAMES[unit] + '</td>' +
-              '<td>' + speed + ' min/field</td>' +
-              '<td>' + travelStr + '</td>' +
-              '</tr>';
-          }
-
-          table += '</table>';
-          $result.html(table);
-        });
-      });
     },
 
     /**
@@ -1404,6 +1333,38 @@
   var card = null;
 
   /**
+   * Check whether the current world has the watchtower building enabled.
+   * Uses multiple detection methods for reliability.
+   * @returns {boolean} True if watchtower is available on this world.
+   */
+  function hasWatchtower() {
+    // Method 1: Check game_data.features
+    if (typeof game_data !== 'undefined') {
+      if (game_data.features && game_data.features.Watchtower !== undefined) {
+        return true;
+      }
+      // Method 2: Check village building data
+      if (game_data.village && game_data.village.buildings &&
+          game_data.village.buildings.watchtower !== undefined) {
+        return true;
+      }
+    }
+    // Method 3: Check if watchtower building exists in DOM
+    if (typeof $ !== 'undefined' &&
+        $('[data-building="watchtower"], .building_watchtower, img[src*="watchtower"]').length > 0) {
+      return true;
+    }
+    // Method 4: Check cached world config from DataFetcher
+    if (typeof TWTools !== 'undefined' && TWTools.DataFetcher && TWTools.DataFetcher._worldConfig) {
+      var cfg = TWTools.DataFetcher._worldConfig;
+      if (cfg.watchtower !== undefined && cfg.watchtower > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Initialize and show the Map Tools card.
    */
   function init() {
@@ -1429,6 +1390,16 @@
       card = null;
     }
 
+    // Build tabs — watchtower tab only appears on worlds that have the building
+    var tabs = [
+      {id: 'barbs', label: 'Barb Finder'},
+      {id: 'bonus', label: 'Bonus Finder'},
+      {id: 'coords', label: 'Coordinates'}
+    ];
+    if (hasWatchtower()) {
+      tabs.push({id: 'watchtower', label: 'Watchtower'});
+    }
+
     // Create the floating card
     card = TWTools.UI.createCard({
       id: 'map-tools',
@@ -1438,12 +1409,7 @@
       height: 560,
       minWidth: 400,
       minHeight: 300,
-      tabs: [
-        {id: 'barbs', label: 'Barb Finder'},
-        {id: 'bonus', label: 'Bonus Finder'},
-        {id: 'coords', label: 'Coordinates'},
-        {id: 'watchtower', label: 'Watchtower'}
-      ],
+      tabs: tabs,
       onTabChange: function(tabId) {
         // Lazy-render tabs on first activation
         var $panel = card.getTabContent(tabId);

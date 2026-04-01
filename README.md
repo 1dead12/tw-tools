@@ -1,8 +1,8 @@
 # TW Tools Suite v2.1
 
-**Tribal Wars script suite — 7 tools for combat, intel, and map.**
+**Tribal Wars script suite — 6 tools for combat, intel, and map.**
 
-7 independent quickbar scripts sharing a common UI library. Game-native TW styling, floating card widgets.
+6 independent quickbar scripts sharing a common UI library. Game-native TW styling, floating card widgets.
 
 ## Scripts
 
@@ -13,8 +13,7 @@
 | 3 | **tw-scavenge** | Economy | Mass Scavenge v2 — group selection, checkbox villages, keep-home |
 | 4 | **tw-overview** | Intel | Troop Overview — army summary, nuke counter, command tracker |
 | 5 | **tw-map-tools** | Map | Extended Map — barb finder, bonus finder, coord picker, watchtower |
-| 6 | **tw-reminder** | Utility | Timer & Reminders — custom countdowns with sound alerts |
-| 7 | **tw-clock** | Utility | MS Clock v2 — 60fps server time with milliseconds |
+| 6 | **tw-clock** | Utility | MS Clock v3 — 60fps server time with milliseconds + countdown timers |
 
 ## Features
 
@@ -59,19 +58,16 @@
 - **Coordinate picker**: click map to collect coords, BB-code export
 - **Watchtower planner**: detection ranges, coverage overlap matrix
 
-### tw-reminder.js — Timer & Reminders v1
-
-- Custom countdown timers with labels and colors
-- Sound alerts (inline beep, no external dependency)
-- Persists across page refreshes
-- Auto-cleanup expired timers
-- Quick-add from incoming attack times
-
-### tw-clock.js — MS Clock v2
+### tw-clock.js — MS Clock v3
 
 - `performance.now()` interpolated server time
 - 60fps display with milliseconds
 - Optional game clock patching
+- **Countdown timers** with labels, colors, and sound alerts
+- Timer persistence across page refreshes
+- Auto-cleanup expired timers (configurable interval)
+- Quick-add timers from incoming attack times
+- Settings: font size, volume, cleanup interval
 
 ## Installation
 
@@ -90,7 +86,6 @@ javascript:$.getScript('https://1dead12.github.io/tw-tools/dist/tw-snipe.min.js'
 | Scavenge | `javascript:$.getScript('https://1dead12.github.io/tw-tools/dist/tw-scavenge.min.js');void 0;` |
 | Overview | `javascript:$.getScript('https://1dead12.github.io/tw-tools/dist/tw-overview.min.js');void 0;` |
 | Map Tools | `javascript:$.getScript('https://1dead12.github.io/tw-tools/dist/tw-map-tools.min.js');void 0;` |
-| Reminders | `javascript:$.getScript('https://1dead12.github.io/tw-tools/dist/tw-reminder.min.js');void 0;` |
 | Clock | `javascript:$.getScript('https://1dead12.github.io/tw-tools/dist/tw-clock.min.js');void 0;` |
 
 ### Bookmarklet (no Premium needed)
@@ -101,7 +96,7 @@ Create browser bookmarks with the same URLs above.
 
 ```bash
 npm install
-npm run build              # Build all 7 scripts
+npm run build              # Build all 6 scripts
 npm run build:snipe        # Build only tw-snipe
 npm run build:planner      # Build only tw-planner
 ```
@@ -120,14 +115,13 @@ tw-tools/
 │   ├── tw-scavenge.js    # Mass Scavenge v2 — Economy (1555 lines)
 │   ├── tw-overview.js    # Troop Overview — Intel (1419 lines)
 │   ├── tw-map-tools.js   # Extended Map — Map (1499 lines)
-│   ├── tw-reminder.js    # Reminders — Utility (861 lines)
-│   └── tw-clock.js       # MS Clock v2 — Utility (394 lines)
+│   └── tw-clock.js       # MS Clock v3 + Timers — Utility (740 lines)
 ├── dist/                 # Built files (min.js + quickbar.js per script)
 ├── build.js              # Build system (concat libs + minify)
 └── package.json
 ```
 
-**Total**: ~12,200 lines source → ~290 KB minified across 7 scripts.
+**Total**: ~11,700 lines source → ~280 KB minified across 6 scripts.
 
 Each `dist/*.min.js` is self-contained (libs bundled in). No external dependencies at runtime except jQuery (provided by TW).
 

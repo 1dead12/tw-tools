@@ -250,7 +250,7 @@
         dataType: 'html',
         timeout: 15000,
         success: function(html) {
-          var result = parseCombinedOverview(html);
+          var result = parseCombinedOverview(html, page);
           allTroops = allTroops.concat(result.villages);
 
           if (statusCb) {
@@ -283,9 +283,10 @@
   /**
    * Parse the combined overview page to extract troop counts per village.
    * @param {string} html - Raw HTML of the combined overview page.
+   * @param {number} [page=0] - Current page index (0-based), used for safety limit.
    * @returns {{villages: VillageTroops[], hasNextPage: boolean}} Parsed data.
    */
-  function parseCombinedOverview(html) {
+  function parseCombinedOverview(html, page) {
     var $page = $('<div/>').html(html);
     var villages = [];
 
@@ -367,15 +368,25 @@
       }
     });
 
-    // Check for pagination - look for next page link
-    var hasNextPage = $page.find('a.paged-nav-item[href*="page="]').length > 0 ||
-                      $page.find('.paged-nav-item:last').hasClass('selected') === false;
+    // Default: no more pages
+    var hasNextPage = false;
 
-    // More precise check: see if there's a "next" link
+    // Check if pagination exists
     var $navItems = $page.find('.paged-nav-item');
-    if ($navItems.length > 0) {
+    if ($navItems.length > 1) {
+      // Find current selected page
       var $current = $navItems.filter('.selected, .active');
-      hasNextPage = $current.next('.paged-nav-item').length > 0;
+      if ($current.length > 0) {
+        hasNextPage = $current.next('.paged-nav-item').length > 0;
+      } else {
+        // No selected item found — check if there are page links beyond page 0
+        hasNextPage = $page.find('a.paged-nav-item[href*="page="]').length > 0;
+      }
+    }
+
+    // Safety limit: stop after 100 pages max (1000 villages) to prevent runaway
+    if (page >= 100) {
+      hasNextPage = false;
     }
 
     return { villages: villages, hasNextPage: hasNextPage };
