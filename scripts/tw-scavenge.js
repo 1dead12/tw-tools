@@ -301,7 +301,9 @@
         if ($row.length === 0) return;
 
         // Parse tier checkboxes/images from the row cells
+        // Detect: unlocked tiers AND which tiers are currently running
         var unlockedTiers = [];
+        var runningTiers = 0;
         var $cells = $row.find('td');
         var tierIndex = 0;
         $cells.each(function(idx) {
@@ -311,20 +313,32 @@
           var $img = $cell.find('img');
           if ($cb.length || $img.length) {
             tierIndex++;
-            // Checkbox not disabled or img present = tier is unlocked/active
-            if (($cb.length && !$cb.prop('disabled')) || $img.length) {
+            if ($cb.length && !$cb.prop('disabled')) {
+              // Checkbox present and enabled = tier unlocked and idle
               unlockedTiers.push(tierIndex);
+            } else if ($img.length) {
+              // Image instead of checkbox = tier is either running or locked
+              var imgSrc = ($img.attr('src') || '').toLowerCase();
+              var imgClass = ($img.attr('class') || '').toLowerCase();
+              // Running tiers typically show a scavenge/running icon (not a lock icon)
+              if (imgSrc.indexOf('lock') === -1 && imgClass.indexOf('lock') === -1) {
+                unlockedTiers.push(tierIndex);
+                runningTiers++;
+              }
             }
           }
         });
+
+        // Determine status: if any tier shows a running image, village is scavenging
+        var status = runningTiers > 0 ? 'running' : 'idle';
 
         villages.push({
           id: villageId,
           name: villageName,
           coords: coords,
-          troops: {}, // No troop data on mass scavenge page
+          troops: {}, // Troop data fetched separately via fetchTroopCounts
           unlockedTiers: unlockedTiers.length > 0 ? unlockedTiers : [1, 2, 3, 4],
-          status: 'idle',
+          status: status,
           checked: false
         });
       });
@@ -1038,7 +1052,8 @@
   // ============================================================
 
   /**
-   * Sends scavenge squads to the TW API in batches.
+   * Sends scavenge squads to the TW API one-per-village sequentially.
+   * Each squad is sent as a separate request to the village's scavenge endpoint.
    */
   var Sender = {
     /** @private {boolean} Whether a send operation is in progress. */
@@ -1055,7 +1070,8 @@
 
     /**
      * Send all squads for checked villages.
-     * @param {Object[]} allSquads - Array of squad payloads.
+     * Sends one request per squad (each squad = one tier for one village).
+     * @param {Object[]} allSquads - Array of squad payloads (village_id, candidate_squad, option_id).
      * @param {function(Object)} onProgress - Progress callback.
      * @param {function(Object)} onComplete - Completion callback.
      */
@@ -1073,17 +1089,11 @@
         return;
       }
 
-      // Split into batches of BATCH_SIZE
-      var batches = [];
-      for (var i = 0; i < allSquads.length; i += BATCH_SIZE) {
-        batches.push(allSquads.slice(i, i + BATCH_SIZE));
-      }
-
       var self = this;
-      var batchIndex = 0;
+      var queue = allSquads.slice();
 
-      var sendNextBatch = function() {
-        if (batchIndex >= batches.length) {
+      var sendNext = function() {
+        if (queue.length === 0) {
           self._sending = false;
           onComplete({
             sent: self._sent,
@@ -1093,75 +1103,68 @@
           return;
         }
 
-        var batch = batches[batchIndex];
-        batchIndex++;
-
-        // Use TribalWars.post for scavenge API
-        if (typeof TribalWars !== 'undefined' && TribalWars.post) {
-          TribalWars.post('scavenge_api', {
-            ajaxaction: 'send_squads',
-            squads: JSON.stringify(batch)
-          }, function(response) {
-            if (response && !response.error) {
-              self._sent += batch.length;
-            } else {
-              self._errors += batch.length;
-            }
-            onProgress({
-              sent: self._sent,
-              errors: self._errors,
-              total: self._total,
-              percent: Math.round(((self._sent + self._errors) / self._total) * 100)
-            });
-            // Delay between batches to avoid rate limiting
-            setTimeout(sendNextBatch, 300);
-          }, function() {
-            self._errors += batch.length;
-            onProgress({
-              sent: self._sent,
-              errors: self._errors,
-              total: self._total,
-              percent: Math.round(((self._sent + self._errors) / self._total) * 100)
-            });
-            setTimeout(sendNextBatch, 500);
+        var squad = queue.shift();
+        self._sendSingleSquad(squad, function(success) {
+          if (success) {
+            self._sent++;
+          } else {
+            self._errors++;
+          }
+          onProgress({
+            sent: self._sent,
+            errors: self._errors,
+            total: self._total,
+            percent: Math.round(((self._sent + self._errors) / self._total) * 100)
           });
-        } else {
-          // Fallback: AJAX post
-          $.ajax({
-            url: '/game.php?village=' + TWTools.getVillageId() +
-                 '&screen=place&mode=scavenge&ajaxaction=send_squads&h=' + TWTools.getCsrf(),
-            type: 'POST',
-            contentType: 'application/json',
-            data: JSON.stringify({ squads: batch }),
-            success: function(response) {
-              if (response && !response.error) {
-                self._sent += batch.length;
-              } else {
-                self._errors += batch.length;
-              }
-              onProgress({
-                sent: self._sent,
-                errors: self._errors,
-                total: self._total,
-                percent: Math.round(((self._sent + self._errors) / self._total) * 100)
-              });
-              setTimeout(sendNextBatch, 300);
-            },
-            error: function() {
-              self._errors += batch.length;
-              onProgress({
-                sent: self._sent,
-                errors: self._errors,
-                total: self._total,
-                percent: Math.round(((self._sent + self._errors) / self._total) * 100)
-              });
-              setTimeout(sendNextBatch, 500);
-            }
-          });
-        }
+          // Delay between requests to avoid rate limiting
+          setTimeout(sendNext, 250);
+        });
       };
 
-      sendNextBatch();
+      sendNext();
+    },
+
+    /**
+     * Send a single scavenge squad to the TW API.
+     * Builds form-encoded data matching the game's native format.
+     * @private
+     * @param {Object} squad - Squad payload: { village_id, candidate_squad, option_id }.
+     * @param {function(boolean)} callback - Called with true on success, false on error.
+     */
+    _sendSingleSquad: function(squad, callback) {
+      var villageId = squad.village_id;
+      var csrf = TWTools.getCsrf();
+
+      // Build form data matching TW native scavenge format:
+      // squad_requests[0][village_id]=XXX
+      // squad_requests[0][candidate_squad][spear]=N
+      // squad_requests[0][option_id]=1
+      var formData = {};
+      formData['squad_requests[0][village_id]'] = villageId;
+      formData['squad_requests[0][option_id]'] = squad.option_id;
+
+      var units = squad.candidate_squad || {};
+      for (var unit in units) {
+        if (units.hasOwnProperty(unit) && units[unit] > 0) {
+          formData['squad_requests[0][candidate_squad][' + unit + ']'] = units[unit];
+        }
+      }
+
+      var url = '/game.php?village=' + villageId +
+                '&screen=place&mode=scavenge&ajaxaction=send_squad&h=' + csrf;
+
+      $.ajax({
+        url: url,
+        type: 'POST',
+        data: formData,
+        dataType: 'json',
+        success: function(response) {
+          callback(!response || !response.error);
+        },
+        error: function() {
+          callback(false);
+        }
+      });
     },
 
     /**
@@ -1987,6 +1990,49 @@
   // INITIALIZATION
   // ============================================================
 
+  /**
+   * Auto-launch flag key in localStorage.
+   * Set before redirect so the script auto-opens after page load.
+   * @type {string}
+   */
+  var AUTO_LAUNCH_KEY = STORAGE_PREFIX + 'auto_launch';
+
+  /**
+   * Redirect to the mass scavenge page if not already there.
+   * Sets a localStorage flag so the script auto-opens after redirect.
+   * @returns {boolean} True if redirecting (caller should abort).
+   */
+  function redirectToMassScavenge() {
+    if (ScavengeParser.isOnMassScavengePage()) return false;
+
+    // Build mass scavenge URL for the current village
+    var villageId = TWTools.getVillageId();
+    var baseUrl = window.location.pathname;
+    var newUrl = baseUrl + '?village=' + villageId + '&screen=place&mode=scavenge_mass';
+
+    // Set auto-launch flag so we open the UI after page loads
+    try { localStorage.setItem(AUTO_LAUNCH_KEY, '1'); } catch (e) {}
+
+    window.location.href = newUrl;
+    return true;
+  }
+
+  /**
+   * Check if script should auto-launch (after redirect).
+   * Consumes the flag on check.
+   * @returns {boolean} True if auto-launch was requested.
+   */
+  function checkAutoLaunch() {
+    try {
+      var flag = localStorage.getItem(AUTO_LAUNCH_KEY);
+      if (flag) {
+        localStorage.removeItem(AUTO_LAUNCH_KEY);
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
   function init() {
     // Verify TWTools is loaded
     if (typeof window.TWTools === 'undefined') {
@@ -2000,15 +2046,34 @@
       return;
     }
 
+    // Redirect to mass scavenge page if not already there
+    if (redirectToMassScavenge()) return;
+
     injectStyles();
     UI.show();
   }
 
-  // Auto-run on load
+  // Auto-run on load (quickbar click or auto-launch after redirect)
+  function tryInit() {
+    if (checkAutoLaunch() || typeof window._twsc_manual_launch !== 'undefined') {
+      init();
+    }
+  }
+
+  // If launched from quickbar, run immediately; if auto-launch, wait for DOM
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
+    document.addEventListener('DOMContentLoaded', function() {
+      if (checkAutoLaunch()) {
+        init();
+      }
+    });
   } else {
-    init();
+    // Direct quickbar execution — check for auto-launch first, otherwise normal init
+    if (checkAutoLaunch()) {
+      init();
+    } else {
+      init();
+    }
   }
 
 })(window, typeof jQuery !== 'undefined' ? jQuery : null);
