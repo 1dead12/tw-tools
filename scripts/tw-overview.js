@@ -344,20 +344,36 @@
     // Parse header to identify unit columns
     var unitColumns = parseUnitHeaders($table);
 
-    // Parse data rows
+    // Parse data rows — only actual village rows, skip summary sections
+    // The game page has sections: village rows, then "Príkazy" (commands),
+    // then "Vojenské jednotky" (military units) summary rows.
+    // We only want the village rows (those with screen=main&village=NNN links).
+    var hitSummarySection = false;
     $table.find('tbody tr, tr').not(':first').each(function() {
       var $row = $(this);
       var $cells = $row.find('td');
 
       if ($cells.length < 3) return; // Skip non-data rows
 
-      // First cell usually contains village link
-      var $villageLink = $row.find('a[href*="village"]').first();
+      // Detect summary section headers: "Príkazy", "Vojenské jednotky", etc.
+      var firstCellText = $.trim($cells.eq(0).text());
+      if (/^(Príkazy|Vojenské jednotky|Commands|Troops|Befehle|Rozkazy|Militaire eenheden)/i.test(firstCellText)) {
+        hitSummarySection = true;
+        return; // Skip this row
+      }
+      // Once we hit a summary section, skip all remaining rows
+      if (hitSummarySection) return;
+
+      // First cell must contain a village link (screen=main or screen=overview with village=NNN)
+      var $villageLink = $row.find('a[href*="village="]').first();
       if ($villageLink.length === 0) return;
 
       var villageHref = $villageLink.attr('href') || '';
+      // Must be an actual village link, not a command/unit summary link
       var villageIdMatch = villageHref.match(/village=(\d+)/);
       var villageId = villageIdMatch ? parseInt(villageIdMatch[1], 10) : 0;
+      if (villageId === 0) return;
+
       var villageName = $.trim($villageLink.text());
 
       // Parse coordinates from village name or link
