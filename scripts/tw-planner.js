@@ -119,6 +119,24 @@
     }
   }
 
+  /**
+   * Play beep sound repeated N times with a short gap.
+   * Uses Settings.alertRepeat for the count.
+   */
+  function playBeepRepeated() {
+    var count = Math.max(1, Math.min(10, Settings.alertRepeat || 3));
+    var played = 0;
+    function next() {
+      if (played >= count) return;
+      playBeep();
+      played++;
+      if (played < count) {
+        setTimeout(next, 700); // 700ms gap between beeps
+      }
+    }
+    next();
+  }
+
   // ============================================================
   // SETTINGS
   // ============================================================
@@ -139,6 +157,9 @@
     /** @type {boolean} Whether sound alerts are enabled. */
     soundEnabled: true,
 
+    /** @type {number} How many times the beep repeats on alert (1-10). */
+    alertRepeat: 3,
+
     /** @type {boolean} Auto-sort attack list by launch time. */
     autoSort: true,
 
@@ -156,6 +177,7 @@
         this.fakeCatCount = saved.fakeCatCount || 1;
         this.alertSeconds = saved.alertSeconds || 30;
         this.soundEnabled = saved.soundEnabled !== false;
+        this.alertRepeat = saved.alertRepeat || 3;
         this.autoSort = saved.autoSort !== false;
         this.fakeMaxDistance = saved.fakeMaxDistance || 50;
       }
@@ -171,6 +193,7 @@
         fakeCatCount: this.fakeCatCount,
         alertSeconds: this.alertSeconds,
         soundEnabled: this.soundEnabled,
+        alertRepeat: this.alertRepeat,
         autoSort: this.autoSort,
         fakeMaxDistance: this.fakeMaxDistance
       });
@@ -962,7 +985,7 @@
         if (Settings.soundEnabled && !atk.alerted && remaining > 0 &&
             remaining <= Settings.alertSeconds * 1000) {
           atk.alerted = true;
-          playBeep();
+          playBeepRepeated();
           TWTools.UI.toast('ALERT: Attack on ' + plan.targetCoords + ' launches in ' +
             Settings.alertSeconds + 's!', 'warning');
         }
@@ -993,7 +1016,7 @@
         if (remRemaining <= 0 && remRemaining > -5000) {
           // Reminder just fired — play beep and mark as beeped
           _remindersBeeped[rem.id] = true;
-          playBeep();
+          playBeepRepeated();
           TWTools.UI.toast('REMINDER: ' + (rem.label || 'Attack reminder'), 'warning');
 
           // Mark as done in localStorage so tw-clock also sees it
@@ -1559,6 +1582,11 @@
       '      <td><input type="number" id="' + ID_PREFIX + 'set-alert-sec" ',
       '        value="' + Settings.alertSeconds + '" style="width:50px;font-size:11px;" min="5" max="300" /> seconds</td>',
       '    </tr>',
+      '    <tr>',
+      '      <td>Alert sound repeats:</td>',
+      '      <td><input type="number" id="' + ID_PREFIX + 'set-alert-repeat" ',
+      '        value="' + Settings.alertRepeat + '" style="width:50px;font-size:11px;" min="1" max="10" /> times</td>',
+      '    </tr>',
 
       // Auto sort
       '    <tr>',
@@ -1607,6 +1635,7 @@
       Settings.fakeCatCount = parseInt($('#' + ID_PREFIX + 'set-fake-cat').val(), 10) || 1;
       Settings.soundEnabled = $('#' + ID_PREFIX + 'set-sound').is(':checked');
       Settings.alertSeconds = parseInt($('#' + ID_PREFIX + 'set-alert-sec').val(), 10) || 30;
+      Settings.alertRepeat = Math.max(1, Math.min(10, parseInt($('#' + ID_PREFIX + 'set-alert-repeat').val(), 10) || 3));
       Settings.autoSort = $('#' + ID_PREFIX + 'set-autosort').is(':checked');
       Settings.fakeMaxDistance = parseInt($('#' + ID_PREFIX + 'set-fake-dist').val(), 10) || 50;
       Settings.save();
@@ -1614,7 +1643,7 @@
     });
 
     $('#' + ID_PREFIX + 'test-sound').on('click', function() {
-      playBeep();
+      playBeepRepeated();
     });
   }
 
