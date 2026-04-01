@@ -344,45 +344,34 @@
     // Parse header to identify unit columns
     var unitColumns = parseUnitHeaders($table);
 
-    // Parse data rows — only actual village rows, skip summary sections
-    // The game page has sections: village rows, then "Príkazy" (commands),
-    // then "Vojenské jednotky" (military units) summary rows.
-    // We only want the village rows (those with screen=main&village=NNN links).
-    var hitSummarySection = false;
+    // Parse data rows — ONLY actual village rows.
+    // Village rows have coordinates like "(407|513)" in the first cell.
+    // Summary rows ("Príkazy", "Vojenské jednotky") do NOT have coordinates.
+    // Aggregate by village ID — some views show the same village multiple times.
+    var villageMap = {};
     $table.find('tbody tr, tr').not(':first').each(function() {
       var $row = $(this);
       var $cells = $row.find('td');
 
       if ($cells.length < 3) return; // Skip non-data rows
 
-      // Detect summary section headers: "Príkazy", "Vojenské jednotky", etc.
-      var firstCellText = $.trim($cells.eq(0).text());
-      if (/^(Príkazy|Vojenské jednotky|Commands|Troops|Befehle|Rozkazy|Militaire eenheden)/i.test(firstCellText)) {
-        hitSummarySection = true;
-        return; // Skip this row
-      }
-      // Once we hit a summary section, skip all remaining rows
-      if (hitSummarySection) return;
+      // DEFINITIVE filter: row must contain coordinates (NNN|NNN)
+      var rowText = $row.text();
+      var coordsMatch = rowText.match(/\((\d{1,3}\|\d{1,3})\)/);
+      if (!coordsMatch) return; // Not a village row — skip
+      var coords = coordsMatch[1];
 
-      // First cell must contain a village link (screen=main or screen=overview with village=NNN)
+      // Must have a village link
       var $villageLink = $row.find('a[href*="village="]').first();
       if ($villageLink.length === 0) return;
 
       var villageHref = $villageLink.attr('href') || '';
-      // Must be an actual village link, not a command/unit summary link
       var villageIdMatch = villageHref.match(/village=(\d+)/);
       var villageId = villageIdMatch ? parseInt(villageIdMatch[1], 10) : 0;
       if (villageId === 0) return;
 
       var villageName = $.trim($villageLink.text());
-
-      // Parse coordinates from village name or link
-      var coordsMatch = villageName.match(/\((\d{1,3}\|\d{1,3})\)/) ||
-                        $row.text().match(/(\d{1,3}\|\d{1,3})/);
-      var coords = coordsMatch ? coordsMatch[1] : '';
-
-      // Clean village name (remove coords part)
-      villageName = villageName.replace(/\s*\(\d{1,3}\|\d{1,3}\)\s*/, '').trim();
+      villageName = villageName.replace(/\s*\(\d{1,3}\|\d{1,3}\)\s*K?\d*\s*$/, '').trim();
 
       // Parse unit counts from cells
       var units = {};
@@ -398,28 +387,48 @@
         }
       }
 
-      // Determine if this is a nuke village
-      var offensiveCount = (units.axe || 0) + (units.light || 0);
-      if (settings.includeArchers) {
-        offensiveCount += (units.marcher || 0);
-      }
-      var isNuke = offensiveCount >= settings.nukeThreshold;
-
-      // Check for noble
-      var hasNoble = (units.snob || 0) > 0;
-
-      if (villageId > 0) {
-        villages.push({
+      // Aggregate: if village already seen, SUM the troop counts
+      if (villageMap[villageId]) {
+        var existing = villageMap[villageId];
+        for (var ut in units) {
+          if (units.hasOwnProperty(ut)) {
+            existing.units[ut] = (existing.units[ut] || 0) + (units[ut] || 0);
+          }
+        }
+        existing.total += total;
+      } else {
+        villageMap[villageId] = {
           id: villageId,
           name: villageName || ('Village ' + coords),
           coords: coords,
           units: units,
-          total: total,
-          isNuke: isNuke,
-          hasNoble: hasNoble
-        });
+          total: total
+        };
       }
     });
+
+    // Convert map to array and compute derived fields
+    for (var vid in villageMap) {
+      if (!villageMap.hasOwnProperty(vid)) continue;
+      var v = villageMap[vid];
+
+      var offensiveCount = (v.units.axe || 0) + (v.units.light || 0);
+      if (settings.includeArchers) {
+        offensiveCount += (v.units.marcher || 0);
+      }
+      var isNuke = offensiveCount >= settings.nukeThreshold;
+      var hasNoble = (v.units.snob || 0) > 0;
+
+      villages.push({
+        id: v.id,
+        name: v.name,
+        coords: v.coords,
+        units: v.units,
+        total: v.total,
+        isNuke: isNuke,
+        hasNoble: hasNoble
+      });
+    }
 
     // Default: no more pages
     var hasNextPage = false;

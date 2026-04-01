@@ -630,14 +630,141 @@
         '<td style="font-family:monospace;font-size:10px;">' + launchPrefix + launchDisplay + '</td>' +
         '<td class="' + ID_PREFIX + 'countdown" style="font-family:monospace;font-size:10px;font-weight:bold;"></td>' +
         '<td class="' + ID_PREFIX + 'status" style="font-size:10px;font-weight:bold;"></td>' +
-        '<td><a href="' + rallyLink + '" target="_blank" ' +
-          'style="font-size:9px;text-decoration:none;" title="Open Rally Point">&#9876; Go</a></td>' +
+        '<td style="white-space:nowrap;">' +
+          '<a href="' + rallyLink + '" target="_blank" ' +
+            'style="font-size:9px;text-decoration:none;" title="Open Rally Point">&#9876; Go</a> ' +
+          '<span class="' + ID_PREFIX + 'add-reminder" data-plan="' + entry.planIdx +
+            '" data-atk="' + entry.attackIdx + '" data-launch="' + atk.launchTimeMs +
+            '" data-label="' + escapeHtml(pl2.targetCoords) + ' ← ' + escapeHtml(atk.source.name) +
+            '" style="cursor:pointer;font-size:9px;color:#2a6a8a;" title="Set reminder alarm">&#9200;</span>' +
+        '</td>' +
         '</tr>'
       );
     }
 
     tableHtml.push('</tbody></table>');
     $container.append(tableHtml.join(''));
+
+    // Bind reminder buttons (⏰)
+    $container.off('click', '.' + ID_PREFIX + 'add-reminder');
+    $container.on('click', '.' + ID_PREFIX + 'add-reminder', function() {
+      var $btn = $(this);
+      var launchMs = parseFloat($btn.attr('data-launch'));
+      var label = $btn.attr('data-label');
+      showReminderDialog(label, launchMs);
+    });
+  }
+
+  /**
+   * Show reminder setup dialog for an attack.
+   * Lets user pick how many seconds/minutes before launch to be alerted.
+   * @param {string} label - Attack description for the reminder.
+   * @param {number} launchMs - Launch time in ms since midnight.
+   */
+  function showReminderDialog(label, launchMs) {
+    // Remove existing dialog
+    $('#' + ID_PREFIX + 'reminder-dialog').remove();
+
+    var presets = [
+      { label: '10 sec', sec: 10 },
+      { label: '30 sec', sec: 30 },
+      { label: '1 min', sec: 60 },
+      { label: '2 min', sec: 120 },
+      { label: '5 min', sec: 300 },
+      { label: '10 min', sec: 600 }
+    ];
+
+    var html = '<div id="' + ID_PREFIX + 'reminder-dialog" style="' +
+      'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);' +
+      'background:#f5e6c0;border:2px solid #a08040;border-radius:6px;' +
+      'padding:16px;z-index:999999;box-shadow:0 4px 16px rgba(0,0,0,0.3);' +
+      'min-width:280px;font-size:12px;color:#3a2a0a;">' +
+      '<div style="font-weight:bold;font-size:13px;margin-bottom:8px;">' +
+        '&#9200; Set Reminder' +
+      '</div>' +
+      '<div style="margin-bottom:8px;font-size:11px;color:#6a5a2a;">' +
+        'Attack: ' + label +
+      '</div>' +
+      '<div style="margin-bottom:8px;">Alert me before launch:</div>' +
+      '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;">';
+
+    for (var i = 0; i < presets.length; i++) {
+      html += '<button class="' + ID_PREFIX + 'reminder-preset" data-sec="' + presets[i].sec + '" ' +
+        'style="padding:6px 12px;background:#d4b87a;border:1px solid #a08040;' +
+        'border-radius:3px;cursor:pointer;font-size:11px;color:#3a2a0a;">' +
+        presets[i].label + '</button>';
+    }
+
+    html += '</div>' +
+      '<div style="display:flex;gap:6px;align-items:center;margin-bottom:12px;">' +
+        '<span>Custom:</span>' +
+        '<input type="number" id="' + ID_PREFIX + 'reminder-custom" value="30" min="1" max="3600" ' +
+          'style="width:60px;padding:4px;border:1px solid #a08040;background:#fff;font-size:11px;">' +
+        '<select id="' + ID_PREFIX + 'reminder-unit" style="padding:4px;border:1px solid #a08040;font-size:11px;">' +
+          '<option value="1">seconds</option>' +
+          '<option value="60">minutes</option>' +
+        '</select>' +
+        '<button id="' + ID_PREFIX + 'reminder-custom-btn" ' +
+          'style="padding:4px 10px;background:#4a6b3a;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:11px;">Set</button>' +
+      '</div>' +
+      '<div style="text-align:right;">' +
+        '<button id="' + ID_PREFIX + 'reminder-close" ' +
+          'style="padding:4px 12px;background:#888;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:11px;">Cancel</button>' +
+      '</div>' +
+    '</div>';
+
+    $('body').append(html);
+
+    // Create reminder function
+    var createReminder = function(beforeSec) {
+      var alertMs = launchMs - (beforeSec * 1000);
+      if (alertMs < 0) alertMs += 86400000;
+
+      // Store reminder in shared localStorage for tw-clock to pick up
+      var reminders = [];
+      try { reminders = JSON.parse(localStorage.getItem('twr_timers') || '[]'); } catch (e) {}
+
+      var nowEpoch = Date.now();
+      var serverNow = TWTools.TimeSync.now();
+      var diffToLaunch = launchMs - serverNow;
+      if (diffToLaunch < 0) diffToLaunch += 86400000;
+      var alertEpoch = nowEpoch + diffToLaunch - (beforeSec * 1000);
+
+      reminders.push({
+        id: 'planner_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+        label: '⚔ ' + label + ' (in ' + beforeSec + 's)',
+        mode: 'target',
+        targetTimeAbsMs: alertEpoch,
+        soundEnabled: true,
+        color: beforeSec <= 30 ? 'red' : (beforeSec <= 120 ? 'yellow' : 'green'),
+        done: false,
+        doneAt: null
+      });
+
+      localStorage.setItem('twr_timers', JSON.stringify(reminders));
+
+      $('#' + ID_PREFIX + 'reminder-dialog').remove();
+
+      var beforeLabel = beforeSec >= 60 ? (Math.floor(beforeSec / 60) + 'm ' + (beforeSec % 60) + 's') : (beforeSec + 's');
+      TWTools.UI.toast('Reminder set: ' + beforeLabel + ' before launch', 'success');
+    };
+
+    // Preset buttons
+    $(document).off('click.' + ID_PREFIX + 'rp').on('click.' + ID_PREFIX + 'rp', '.' + ID_PREFIX + 'reminder-preset', function() {
+      createReminder(parseInt($(this).attr('data-sec'), 10));
+    });
+
+    // Custom button
+    $(document).off('click.' + ID_PREFIX + 'rc').on('click.' + ID_PREFIX + 'rc', '#' + ID_PREFIX + 'reminder-custom-btn', function() {
+      var val = parseInt($('#' + ID_PREFIX + 'reminder-custom').val(), 10) || 30;
+      var mult = parseInt($('#' + ID_PREFIX + 'reminder-unit').val(), 10) || 1;
+      createReminder(val * mult);
+    });
+
+    // Close
+    $(document).off('click.' + ID_PREFIX + 'rclose').on('click.' + ID_PREFIX + 'rclose', '#' + ID_PREFIX + 'reminder-close', function() {
+      $('#' + ID_PREFIX + 'reminder-dialog').remove();
+    });
   }
 
   /**
