@@ -977,8 +977,40 @@
    * Update all visible reminder countdowns in the Alarm column and summary panel.
    * Called every 50ms from the main update loop.
    */
+  /** @private Track which reminders already beeped so we don't repeat. */
+  var _remindersBeeped = {};
+
   function updateReminderCountdowns() {
     var now = Date.now();
+
+    // Check reminders for sound alerts (independent of DOM elements)
+    if (Settings.soundEnabled) {
+      var reminders = getPlannerReminders();
+      for (var ri = 0; ri < reminders.length; ri++) {
+        var rem = reminders[ri];
+        if (rem.done || _remindersBeeped[rem.id]) continue;
+        var remRemaining = rem.targetTimeAbsMs - now;
+        if (remRemaining <= 0 && remRemaining > -5000) {
+          // Reminder just fired — play beep and mark as beeped
+          _remindersBeeped[rem.id] = true;
+          playBeep();
+          TWTools.UI.toast('REMINDER: ' + (rem.label || 'Attack reminder'), 'warning');
+
+          // Mark as done in localStorage so tw-clock also sees it
+          try {
+            var all = JSON.parse(localStorage.getItem('twr_timers') || '[]');
+            for (var ai = 0; ai < all.length; ai++) {
+              if (all[ai].id === rem.id) {
+                all[ai].done = true;
+                all[ai].doneAt = now;
+                break;
+              }
+            }
+            localStorage.setItem('twr_timers', JSON.stringify(all));
+          } catch (e) {}
+        }
+      }
+    }
 
     // Update alarm cells in table rows
     $('.' + ID_PREFIX + 'alarm-countdown').each(function() {
@@ -989,7 +1021,6 @@
       $el.css('color', color);
       if (remaining <= 0) {
         $el.html('&#128276; NOW!');
-        // Blink effect
         if (Math.floor(now / 400) % 2 === 0) {
           $el.css('visibility', 'visible');
         } else {
