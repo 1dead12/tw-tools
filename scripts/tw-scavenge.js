@@ -969,21 +969,43 @@
       unitTypes.forEach(function(u) { remainingTroops[u] = available[u]; });
 
       if (mode === 'balanced') {
-        // Split evenly across tiers
-        var perTierDuration = targetDurationSec;
+        // BALANCED: Split troops evenly across all active tiers.
+        // Each tier gets 1/N of each unit type. Duration is whatever the
+        // even split produces — the target duration serves as a max cap.
+        var numTiers = activeTiers.length;
 
-        activeTiers.forEach(function(tierNum) {
+        activeTiers.forEach(function(tierNum, tierIdx) {
           var params = tierParams[tierNum - 1];
           if (!params) return;
 
-          var capacity = Calculator.requiredCapacity(perTierDuration, params);
-          var alloc = Calculator.allocateTroops(remainingTroops, capacity, unitTypes);
-
-          // Subtract allocated
+          var alloc = {};
           var actualCapacity = 0;
+          var isLastTier = (tierIdx === numTiers - 1);
+          var tiersLeft = numTiers - tierIdx;
+
+          unitTypes.forEach(function(u) {
+            var avail = remainingTroops[u] || 0;
+            if (avail <= 0) { alloc[u] = 0; return; }
+
+            // Last tier gets all remaining; others get 1/tiersLeft
+            alloc[u] = isLastTier ? avail : Math.floor(avail / tiersLeft);
+            actualCapacity += alloc[u] * (UNIT_HAUL[u] || 0);
+          });
+
+          // Cap at target duration — scale down if this split exceeds it
+          var maxCapForDuration = Calculator.requiredCapacity(targetDurationSec, params);
+          if (actualCapacity > maxCapForDuration && maxCapForDuration > 0) {
+            var scale = maxCapForDuration / actualCapacity;
+            actualCapacity = 0;
+            unitTypes.forEach(function(u) {
+              alloc[u] = Math.floor((alloc[u] || 0) * scale);
+              actualCapacity += alloc[u] * (UNIT_HAUL[u] || 0);
+            });
+          }
+
+          // Subtract allocated from pool
           unitTypes.forEach(function(u) {
             remainingTroops[u] -= alloc[u] || 0;
-            actualCapacity += (alloc[u] || 0) * (UNIT_HAUL[u] || 0);
           });
 
           if (actualCapacity > 0) {
@@ -996,13 +1018,24 @@
           }
         });
       } else {
-        // Priority mode: fill highest priority tier first, then next
+        // PRIORITY: Fill highest priority tier first up to target duration,
+        // then next tier with remaining troops, and so on.
         activeTiers.forEach(function(tierNum) {
           var params = tierParams[tierNum - 1];
           if (!params) return;
 
-          var capacity = Calculator.requiredCapacity(targetDurationSec, params);
-          var alloc = Calculator.allocateTroops(remainingTroops, capacity, unitTypes);
+          // Calculate total remaining capacity
+          var totalRemaining = 0;
+          unitTypes.forEach(function(u) {
+            totalRemaining += (remainingTroops[u] || 0) * (UNIT_HAUL[u] || 0);
+          });
+          if (totalRemaining <= 0) return;
+
+          // Cap at target duration
+          var maxCapForDuration = Calculator.requiredCapacity(targetDurationSec, params);
+          var targetCapacity = Math.min(totalRemaining, maxCapForDuration);
+
+          var alloc = Calculator.allocateTroops(remainingTroops, targetCapacity, unitTypes);
 
           var actualCapacity = 0;
           unitTypes.forEach(function(u) {
