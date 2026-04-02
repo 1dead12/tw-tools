@@ -347,6 +347,17 @@
         timeout: 15000,
         success: function(html) {
           var result = parseCompleteOverview(html, page);
+
+          // Handle empty group (no matching villages)
+          if (result.emptyGroup) {
+            isFetching = false;
+            allTroopData = splitIntoCategories([]);
+            allTroopData._emptyGroupMsg = result.emptyGroup;
+            troopData = [];
+            callback(troopData);
+            return;
+          }
+
           allRows = allRows.concat(result.rows);
 
           if (statusCb) {
@@ -358,7 +369,6 @@
             setTimeout(fetchPage, REQUEST_DELAY);
           } else {
             isFetching = false;
-            // Split rows into 5 categories
             allTroopData = splitIntoCategories(allRows);
             Store.setCache(cacheKey, allTroopData, CACHE_TTL);
             troopData = allTroopData[currentViewType] || [];
@@ -386,6 +396,17 @@
   function parseCompleteOverview(html, page) {
     var $page = $('<div/>').html(html);
     var rows = [];
+
+    // Check for "no villages in group" info box message
+    var $infoBox = $page.find('.info_box');
+    if ($infoBox.length > 0) {
+      var infoText = $infoBox.text().trim();
+      // TW shows this when group has 0 matching villages
+      if (infoText.indexOf('nepatr') !== -1 || infoText.indexOf('belong') !== -1 ||
+          infoText.indexOf('gehört') !== -1 || infoText.indexOf('no villages') !== -1) {
+        return { rows: [], hasNextPage: false, emptyGroup: infoText };
+      }
+    }
 
     var $table = $page.find('#units_table, table.vis.overview_table');
     if ($table.length === 0) {
@@ -1005,12 +1026,20 @@
     }
 
     if (!data || data.length === 0) {
+      // Show informative empty state — distinguish "not loaded" from "empty group"
+      var emptyMsg = 'No troop data. Click "Fetch Troops" to load.';
+      if (allTroopData && allTroopData._emptyGroupMsg) {
+        emptyMsg = allTroopData._emptyGroupMsg;
+      } else if (allTroopData && allTroopData.own_home && allTroopData.own_home.length === 0 && currentGroupId !== '0') {
+        emptyMsg = 'No villages found in group "' + getGroupLabel() + '".';
+      }
+
       $panel.html(
         '<div style="padding:8px;">' +
         '<button class="btn" id="' + ID_PREFIX + 'fetch-troops" style="margin-bottom:8px;">Fetch Troops</button> ' +
         '<button class="btn" id="' + ID_PREFIX + 'refresh-troops" style="margin-bottom:8px;">Force Refresh</button>' +
         viewSelectHtml + groupSelectHtml +
-        '<p style="color:#7a6840;">No troop data. Click "Fetch Troops" to load.</p>' +
+        '<p style="color:#7a6840;">' + escapeHtml(emptyMsg) + '</p>' +
         '</div>'
       );
 
