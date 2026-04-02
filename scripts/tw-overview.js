@@ -404,11 +404,11 @@
       // TW shows this when group has 0 matching villages
       if (infoText.indexOf('nepatr') !== -1 || infoText.indexOf('belong') !== -1 ||
           infoText.indexOf('gehört') !== -1 || infoText.indexOf('no villages') !== -1) {
-        // Extract just the first sentence (before criteria/links)
-        var firstSentence = infoText.split(/[.\n]/).filter(function(s) {
-          return s.trim().length > 10;
-        })[0] || infoText;
-        return { rows: [], hasNextPage: false, emptyGroup: firstSentence.trim() };
+        // Extract just the key message — find the sentence about the group name
+        // Pattern: "Žiadna z tvojich dedín nepatrí do "GroupName", aktuálne vybratej skupiny dedín."
+        var groupMatch = infoText.match(/[^.]*nepatr[^.]*\./);
+        var msg = groupMatch ? groupMatch[0].trim() : infoText.substring(0, 100);
+        return { rows: [], hasNextPage: false, emptyGroup: msg };
       }
     }
 
