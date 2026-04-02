@@ -98,8 +98,8 @@
     { value: 'own_home', label: 'Own (home)', urlType: 'own_home' },
     { value: 'own_all', label: 'Own (all)', urlType: 'complete' },
     { value: 'in_village', label: 'In village', urlType: 'there' },
-    { value: 'outside', label: 'Outside', urlType: 'away', urlExtra: '&filter_villages=1' },
-    { value: 'in_transit', label: 'In transit', urlType: 'moving', urlExtra: '&filter_villages=1' }
+    { value: 'outside', label: 'Outside', urlType: 'away' },
+    { value: 'in_transit', label: 'In transit', urlType: 'moving' }
   ];
 
   /** Default settings */
