@@ -300,34 +300,48 @@
         var $row = $a.closest('tr');
         if ($row.length === 0) return;
 
-        // Parse tier checkboxes/images from the row cells
-        // Detect: unlocked tiers AND which tiers are currently running
+        // Parse tier cells from the row.
+        // Real DOM: each tier is <td class="option option-N option-inactive|option-locked|option-active" data-id="N">
+        // All cells contain ALL images (lock_mini, unlock_mini, report_scavenging, block_icon) —
+        // visibility is controlled via CSS classes (status-active, status-inactive, status-locked, etc.).
+        // The cell CLASS is the authoritative source for tier status:
+        //   option-inactive = idle/unlocked (no squad sent)
+        //   option-active   = running (squad sent, timer counting)
+        //   option-locked   = locked (not yet unlocked by player)
         var unlockedTiers = [];
         var runningTiers = 0;
-        var $cells = $row.find('td');
-        var tierIndex = 0;
-        $cells.each(function(idx) {
-          if (idx === 0) return; // First cell is village name
+        $row.find('td.option[data-id]').each(function() {
           var $cell = $(this);
-          var $cb = $cell.find('input[type="checkbox"]');
-          var $img = $cell.find('img');
-          if ($cb.length || $img.length) {
-            tierIndex++;
-            if ($cb.length && !$cb.prop('disabled')) {
-              // Checkbox present and enabled = tier unlocked and idle
-              unlockedTiers.push(tierIndex);
-            } else if ($img.length) {
-              // Image instead of checkbox = tier is either running or locked
-              var imgSrc = ($img.attr('src') || '').toLowerCase();
-              var imgClass = ($img.attr('class') || '').toLowerCase();
-              // Running tiers typically show a scavenge/running icon (not a lock icon)
-              if (imgSrc.indexOf('lock') === -1 && imgClass.indexOf('lock') === -1) {
-                unlockedTiers.push(tierIndex);
-                runningTiers++;
-              }
-            }
+          var tierNum = parseInt($cell.attr('data-id'), 10);
+          if (!tierNum) return;
+
+          if ($cell.hasClass('option-locked')) {
+            // Locked tier — skip
+            return;
+          }
+          // Tier is unlocked (either idle or running)
+          unlockedTiers.push(tierNum);
+          if ($cell.hasClass('option-active')) {
+            runningTiers++;
           }
         });
+
+        // Fallback: if no td.option[data-id] cells found, try legacy checkbox approach
+        if ($row.find('td.option[data-id]').length === 0) {
+          var $cells = $row.find('td');
+          var tierIndex = 0;
+          $cells.each(function(idx) {
+            if (idx === 0) return;
+            var $cell = $(this);
+            var $cb = $cell.find('input[type="checkbox"]');
+            if ($cb.length) {
+              tierIndex++;
+              if (!$cb.prop('disabled')) {
+                unlockedTiers.push(tierIndex);
+              }
+            }
+          });
+        }
 
         // Determine status: if any tier shows a running image, village is scavenging
         var status = runningTiers > 0 ? 'running' : 'idle';
@@ -510,19 +524,30 @@
 
             var unlockedTiers = [];
             if ($row.length > 0) {
-              var tierIndex = 0;
-              $row.find('td').each(function(idx) {
-                if (idx === 0) return;
+              // Use td.option[data-id] cells — same approach as parseVillageRows
+              $row.find('td.option[data-id]').each(function() {
                 var $cell = $(this);
-                var $cb = $cell.find('input[type="checkbox"]');
-                var $img = $cell.find('img');
-                if ($cb.length || $img.length) {
-                  tierIndex++;
-                  if (($cb.length && !$cb.prop('disabled')) || $img.length) {
-                    unlockedTiers.push(tierIndex);
-                  }
+                var tierNum = parseInt($cell.attr('data-id'), 10);
+                if (!tierNum) return;
+                if (!$cell.hasClass('option-locked')) {
+                  unlockedTiers.push(tierNum);
                 }
               });
+              // Fallback for legacy format
+              if ($row.find('td.option[data-id]').length === 0) {
+                var tierIndex = 0;
+                $row.find('td').each(function(idx) {
+                  if (idx === 0) return;
+                  var $cell = $(this);
+                  var $cb = $cell.find('input[type="checkbox"]');
+                  if ($cb.length) {
+                    tierIndex++;
+                    if (!$cb.prop('disabled')) {
+                      unlockedTiers.push(tierIndex);
+                    }
+                  }
+                });
+              }
             }
 
             villages.push({

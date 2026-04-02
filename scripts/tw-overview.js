@@ -382,8 +382,18 @@
 
       if ($cells.length < 3) return; // Skip non-data rows
 
-      // Check if this row has a village link (= parent village row)
-      var $villageLink = $row.find('a[href*="village="]').first();
+      // Check if this row has a village name link (= parent village row).
+      // Village name links contain coordinates like "(463|595)" in their text.
+      // Action links ("Príkazy", "Vojenské jednotky") also match a[href*="village="]
+      // but do NOT contain coordinates — so we must distinguish them.
+      var $villageLink = $();
+      $row.find('a[href*="village="]').each(function() {
+        var text = $.trim($(this).text());
+        if (text.match(/\(\d{1,3}\|\d{1,3}\)/)) {
+          $villageLink = $(this);
+          return false; // break
+        }
+      });
       if ($villageLink.length > 0) {
         var villageHref = $villageLink.attr('href') || '';
         var villageIdMatch = villageHref.match(/village=(\d+)/);
@@ -399,15 +409,20 @@
       if (currentVillageId === 0) return; // No village context yet
 
       // Detect the row label (column 1): vlastné, v dedine, vonku, na ceste, celkovo
-      var labelCell = $.trim($cells.eq(1).text()).toLowerCase();
+      var labelCell = $.trim($cells.eq(1).text()).toLowerCase().replace(/\s+/g, ' ');
       // For rows without village link, column 0 IS the label
       if ($villageLink.length === 0) {
-        labelCell = $.trim($cells.eq(0).text()).toLowerCase();
+        labelCell = $.trim($cells.eq(0).text()).toLowerCase().replace(/\s+/g, ' ');
       }
 
-      // For "complete" view: skip all rows EXCEPT "celkovo" (total)
+      // For "complete" view: skip all rows EXCEPT "celkovo" / "total" row
+      // Use includes() for robustness against extra whitespace or formatting
       if (isCompleteView) {
-        if (labelCell !== 'celkovo') return;
+        var isTotalRow = (labelCell.indexOf('celkovo') !== -1 ||
+                          labelCell.indexOf('total') !== -1 ||
+                          labelCell.indexOf('gesamt') !== -1 ||
+                          labelCell.indexOf('łącznie') !== -1);
+        if (!isTotalRow) return;
       }
 
       // Determine which cells hold unit data
@@ -425,7 +440,10 @@
           var cellText = $cells.eq(adjustedIndex).text();
           var count = parseIntSafe(cellText);
           units[unitType] = count;
-          total += count;
+          // Only count recognized units in the total (skip militia and other specials)
+          if (ALL_UNITS.indexOf(unitType) !== -1) {
+            total += count;
+          }
         }
       }
 

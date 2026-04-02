@@ -855,26 +855,40 @@
           e.preventDefault();
 
           // Calculate map coordinates from the click position.
-          // TWMap.pos contains the current map-center [x, y].
-          // The field size in pixels depends on the zoom level.
-          var fieldSize = 53; // default TW field pixel size
-          if (TWMap.map && TWMap.map.scale && TWMap.map.zoom !== undefined) {
-            fieldSize = TWMap.map.scale[TWMap.map.zoom] || 53;
+          // Prefer TWMap.map.coordByEvent / coordByPixel if available (uses TW's
+          // own conversion which handles zoom, offset, and viewport correctly).
+          // Otherwise fall back to manual calculation using TWMap.pos.
+          var cx, cy;
+
+          if (TWMap.map && typeof TWMap.map.coordByEvent === 'function') {
+            // TW's own pixel-to-coord conversion (most reliable)
+            var coord = TWMap.map.coordByEvent(e);
+            cx = coord[0];
+            cy = coord[1];
+          } else {
+            // Fallback: manual calculation
+            var fieldSize = 53; // default TW field pixel size
+            if (TWMap.map && TWMap.map.scale) {
+              // scale is an array indexed by zoom level; zoom may be undefined
+              // on some worlds, so fall back to scale[0] (default zoom)
+              var zoom = (typeof TWMap.map.zoom === 'number') ? TWMap.map.zoom : 0;
+              fieldSize = TWMap.map.scale[zoom] || TWMap.map.scale[0] || 53;
+            }
+
+            var rect = mapEl.getBoundingClientRect();
+            var pixelX = e.clientX - rect.left;
+            var pixelY = e.clientY - rect.top;
+
+            var centerX = 500;
+            var centerY = 500;
+            if (TWMap.pos) {
+              centerX = TWMap.pos[0];
+              centerY = TWMap.pos[1];
+            }
+
+            cx = Math.floor(centerX + (pixelX - rect.width / 2) / fieldSize);
+            cy = Math.floor(centerY + (pixelY - rect.height / 2) / fieldSize);
           }
-
-          var rect = mapEl.getBoundingClientRect();
-          var pixelX = e.clientX - rect.left;
-          var pixelY = e.clientY - rect.top;
-
-          var centerX = 500;
-          var centerY = 500;
-          if (TWMap.pos) {
-            centerX = TWMap.pos[0];
-            centerY = TWMap.pos[1];
-          }
-
-          var cx = Math.floor(centerX + (pixelX - rect.width / 2) / fieldSize);
-          var cy = Math.floor(centerY + (pixelY - rect.height / 2) / fieldSize);
 
           self._toggleCoord(cx, cy);
         };
@@ -1286,7 +1300,8 @@
       // Get map view parameters
       var fieldSize = 53; // default TW field size in pixels
       if (TWMap.map && TWMap.map.scale) {
-        fieldSize = TWMap.map.scale[TWMap.map.zoom] || 53;
+        var zoom = (typeof TWMap.map.zoom === 'number') ? TWMap.map.zoom : 0;
+        fieldSize = TWMap.map.scale[zoom] || TWMap.map.scale[0] || 53;
       }
 
       var centerX = 0;
@@ -1338,26 +1353,31 @@
    * @returns {boolean} True if watchtower is available on this world.
    */
   function hasWatchtower() {
-    // Method 1: Check game_data.features
+    // Method 1: Check game_data.features (must be active or possible, not just key exists)
     if (typeof game_data !== 'undefined') {
-      if (game_data.features && game_data.features.Watchtower !== undefined) {
+      if (game_data.features && game_data.features.Watchtower &&
+          (game_data.features.Watchtower.active || game_data.features.Watchtower.possible)) {
         return true;
       }
-      // Method 2: Check village building data
+      // Method 2: Check village building data (level must be > 0, not just key exists)
       if (game_data.village && game_data.village.buildings &&
-          game_data.village.buildings.watchtower !== undefined) {
+          game_data.village.buildings.watchtower > 0) {
         return true;
       }
     }
     // Method 3: Check if watchtower building exists in DOM
+    // ONLY match actual building elements — do NOT use img[src*="watchtower"]
+    // because map topo_image tile URLs contain "watchtower=0" as a query
+    // parameter even on worlds without watchtower, causing false positives.
+    // Also avoid [data-building="watchtower"] on build menus (level 0 buildings).
     if (typeof $ !== 'undefined' &&
-        $('[data-building="watchtower"], .building_watchtower, img[src*="watchtower"]').length > 0) {
+        $('.building_watchtower[data-level]:not([data-level="0"])').length > 0) {
       return true;
     }
     // Method 4: Check cached world config from DataFetcher
     if (typeof TWTools !== 'undefined' && TWTools.DataFetcher && TWTools.DataFetcher._worldConfig) {
       var cfg = TWTools.DataFetcher._worldConfig;
-      if (cfg.watchtower !== undefined && cfg.watchtower > 0) {
+      if (cfg.watchtower > 0) {
         return true;
       }
     }

@@ -229,7 +229,7 @@
     timers.sort(function(a, b) {
       if (a.done && !b.done) return 1;
       if (!a.done && b.done) return -1;
-      return (a.targetTimeAbsMs - now) - (b.targetTimeAbsMs - now);
+      return a.targetTimeAbsMs - b.targetTimeAbsMs;
     });
   }
 
@@ -580,6 +580,10 @@
   function restoreGameClock() {
     var el = document.getElementById('serverTime');
     if (el && el._twcPatched) {
+      // Restore original text content before our patch
+      if (el._twcOriginal) {
+        el.textContent = el._twcOriginal;
+      }
       el._twcPatched = false;
       delete el._twcOriginal;
     }
