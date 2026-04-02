@@ -948,6 +948,8 @@
    * @param {VillageTroops[]} data - Troop data.
    */
   function renderTroops($panel, data) {
+    // Unbind all previous delegated handlers to prevent duplication on re-render
+    $panel.off('.twoview .twogroup .twobtn');
     $panel.empty();
 
     // Build view selector dropdown HTML (reused in both states)
@@ -977,21 +979,23 @@
      * @private
      */
     function bindViewSelector($container) {
+      // Remove old handlers first to prevent duplicate binding on re-render
+      $container.off('change.twoview change.twogroup');
       // View change: just switch the bucket (no re-fetch needed — all views cached)
-      $container.on('change', '#' + ID_PREFIX + 'view-type', function() {
+      $container.on('change.twoview', '#' + ID_PREFIX + 'view-type', function() {
         currentViewType = $(this).val();
         Store.set('view_type', currentViewType);
         if (allTroopData[currentViewType]) {
           troopData = allTroopData[currentViewType];
           renderTroops($container, troopData);
         } else {
-          // Data not loaded yet
           troopData = [];
           fetchTroopDataWithUI($container, false);
         }
       });
       // Group change: must re-fetch (server-side filter)
-      $container.on('change', '#' + ID_PREFIX + 'group-id', function() {
+      $container.on('change.twogroup', '#' + ID_PREFIX + 'group-id', function() {
+        if (isFetching) return; // Prevent concurrent fetches
         currentGroupId = $(this).val();
         Store.set('group_id', currentGroupId);
         allTroopData = {};
@@ -1010,11 +1014,11 @@
         '</div>'
       );
 
-      // Bind fetch buttons
-      $panel.on('click', '#' + ID_PREFIX + 'fetch-troops', function() {
+      // Bind fetch buttons (namespaced to prevent duplication)
+      $panel.on('click.twobtn', '#' + ID_PREFIX + 'fetch-troops', function() {
         fetchTroopDataWithUI($panel, false);
       });
-      $panel.on('click', '#' + ID_PREFIX + 'refresh-troops', function() {
+      $panel.on('click.twobtn', '#' + ID_PREFIX + 'refresh-troops', function() {
         fetchTroopDataWithUI($panel, true);
       });
       bindViewSelector($panel);
@@ -1106,16 +1110,16 @@
       renderTroops($panel, data);
     });
 
-    // Bind refresh
-    $panel.on('click', '#' + ID_PREFIX + 'fetch-troops', function() {
+    // Bind refresh (namespaced)
+    $panel.on('click.twobtn', '#' + ID_PREFIX + 'fetch-troops', function() {
       fetchTroopDataWithUI($panel, true);
     });
 
-    // Bind exports
-    $panel.on('click', '#' + ID_PREFIX + 'export-bbcode', function() {
+    // Bind exports (namespaced)
+    $panel.on('click.twobtn', '#' + ID_PREFIX + 'export-bbcode', function() {
       exportBBCode(data);
     });
-    $panel.on('click', '#' + ID_PREFIX + 'export-csv', function() {
+    $panel.on('click.twobtn', '#' + ID_PREFIX + 'export-csv', function() {
       exportCSV(data);
     });
 
