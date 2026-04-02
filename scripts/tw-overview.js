@@ -267,7 +267,16 @@
    * @property {string} units - Visible units description.
    */
 
-  /** @type {VillageTroops[]} All fetched troop data */
+  /**
+   * All troop data organized by category.
+   * Keys: 'own_home', 'in_village', 'outside', 'in_transit', 'own_all' (celkovo).
+   * Each value is an array of VillageTroops objects.
+   * Fetched ONCE from type=complete, then filtered client-side by view.
+   * @type {Object.<string, VillageTroops[]>}
+   */
+  var allTroopData = {};
+
+  /** @type {VillageTroops[]} Currently displayed troop data (filtered by view) */
   var troopData = [];
 
   /** @type {CommandInfo[]} All fetched command data */
@@ -286,15 +295,33 @@
    * @param {function(VillageTroops[])} callback - Called with troop data array.
    * @param {function(string)} statusCb - Status update callback.
    */
-  function fetchTroopData(callback, statusCb) {
-    // Cache key includes view type AND group so combinations are cached independently
-    var cacheKey = 'troop_data_' + currentViewType + '_g' + currentGroupId;
+  /**
+   * Row label to view category mapping.
+   * The game's complete view uses 5 sub-rows per village with these labels.
+   * We also support the modulo approach (row index % 5) as fallback.
+   * @type {Object.<string, string>}
+   */
+  var LABEL_TO_CATEGORY = {
+    'vlastné': 'own_home', 'vlastne': 'own_home', 'own': 'own_home',
+    'v dedine': 'in_village', 'in village': 'in_village',
+    'vonku': 'outside', 'outside': 'outside',
+    'na ceste': 'in_transit', 'in transit': 'in_transit', 'unterwegs': 'in_transit',
+    'celkovo': 'own_all', 'total': 'own_all', 'gesamt': 'own_all'
+  };
 
-    // Check cache first
+  /** Category order for modulo fallback (index 0-4 in the 5-row block) */
+  var CATEGORY_ORDER = ['own_home', 'in_village', 'outside', 'in_transit', 'own_all'];
+
+  function fetchTroopData(callback, statusCb) {
+    // Cache key includes only group (we fetch ALL views at once from type=complete)
+    var cacheKey = 'troop_all_g' + currentGroupId;
+
+    // Check cache — allTroopData has all 5 categories
     var cached = Store.getCache(cacheKey);
-    if (cached && cached.length > 0) {
-      troopData = cached;
-      callback(cached);
+    if (cached && cached.own_home) {
+      allTroopData = cached;
+      troopData = allTroopData[currentViewType] || [];
+      callback(troopData);
       return;
     }
 
@@ -304,49 +331,44 @@
     }
 
     isFetching = true;
-    if (statusCb) statusCb('Fetching troop overview (' + getViewLabel() + ')...');
+    if (statusCb) statusCb('Fetching troop overview (all views)...');
 
-    var allTroops = [];
+    // Always fetch type=complete — contains ALL 5 sub-rows per village
+    var groupParam = (currentGroupId && currentGroupId !== '0') ? '&group=' + currentGroupId : '';
+    var allRows = [];
     var page = 0;
-    var viewType = currentViewType;
-    var urlTypeParam = getViewUrlParam();
 
-    /**
-     * Fetch a single page of the units overview.
-     * @private
-     */
     function fetchPage() {
-      var groupParam = (currentGroupId && currentGroupId !== '0') ? '&group=' + currentGroupId : '';
-      var url = '/game.php?screen=overview_villages&mode=units&type=' + urlTypeParam + groupParam + '&page=' + page;
+      var url = '/game.php?screen=overview_villages&mode=units&type=complete' + groupParam + '&page=' + page;
 
       $.ajax({
         url: url,
         dataType: 'html',
         timeout: 15000,
         success: function(html) {
-          var result = parseCombinedOverview(html, page, urlTypeParam);
-          allTroops = allTroops.concat(result.villages);
+          var result = parseCompleteOverview(html, page);
+          allRows = allRows.concat(result.rows);
 
           if (statusCb) {
-            statusCb('Loaded page ' + (page + 1) + ' (' + allTroops.length + ' villages)...');
+            statusCb('Loaded page ' + (page + 1) + ' (' + Math.floor(allRows.length / 5) + ' villages)...');
           }
 
-          // Check if there are more pages
           if (result.hasNextPage) {
             page++;
             setTimeout(fetchPage, REQUEST_DELAY);
           } else {
-            // Done fetching all pages
             isFetching = false;
-            troopData = allTroops;
-            Store.setCache(cacheKey, allTroops, CACHE_TTL);
-            callback(allTroops);
+            // Split rows into 5 categories
+            allTroopData = splitIntoCategories(allRows);
+            Store.setCache(cacheKey, allTroopData, CACHE_TTL);
+            troopData = allTroopData[currentViewType] || [];
+            callback(troopData);
           }
         },
         error: function() {
           isFetching = false;
           if (statusCb) statusCb('Error fetching troop data.');
-          callback(allTroops);
+          callback([]);
         }
       });
     }
@@ -355,67 +377,50 @@
   }
 
   /**
-   * Parse the combined overview page to extract troop counts per village.
-   * @param {string} html - Raw HTML of the combined overview page.
-   * @param {number} [page=0] - Current page index (0-based), used for safety limit.
-   * @returns {{villages: VillageTroops[], hasNextPage: boolean}} Parsed data.
+   * Parse the complete overview page (type=complete) which has 5 sub-rows per village.
+   * Returns raw parsed rows with village info, label, and unit counts.
+   * @param {string} html - Raw HTML of the complete overview page.
+   * @param {number} page - Current page index for safety limit.
+   * @returns {{rows: Array, hasNextPage: boolean}} Raw row data and pagination flag.
    */
-  function parseCombinedOverview(html, page, urlTypeParam) {
+  function parseCompleteOverview(html, page) {
     var $page = $('<div/>').html(html);
-    var villages = [];
+    var rows = [];
 
-    // The combined overview has a table with class "vis" containing troop data
-    // Each row represents a village with unit columns
-    var $table = $page.find('#combined_table, table.vis.overview_table');
+    var $table = $page.find('#units_table, table.vis.overview_table');
     if ($table.length === 0) {
-      // Fallback: find any large vis table
       $table = $page.find('table.vis').filter(function() {
         return $(this).find('tr').length > 2;
       }).first();
     }
 
     if ($table.length === 0) {
-      return { villages: [], hasNextPage: false };
+      return { rows: [], hasNextPage: false };
     }
 
-    // Parse header to identify unit columns
+    // Parse header to identify unit columns (complete view always has proper headers)
     var unitColumns = parseUnitHeaders($table);
 
-    // Parse data rows from the units overview table.
-    // Table structure per village:
-    //   - For single-row views (own_home, there, away, moving):
-    //     Row has: [village_name+coords] [label] [spear] [sword] ... [Akcia]
-    //   - For multi-row view (complete/all):
-    //     Parent row: [village_name+coords] [vlastné] [counts...] [Príkazy]
-    //     Sub-rows:   [v dedine] [counts...] [Vojenské jednotky]
-    //                 [vonku] [counts...]
-    //                 [na ceste] [counts...] [Príkazy]
-    //                 [celkovo] [counts...] [Vojenské jednotky]
-    //     For "complete" view, we want the "celkovo" (total) row.
-    var villageMap = {};
-    var isCompleteView = (urlTypeParam === 'complete');
     var currentVillageId = 0;
     var currentVillageName = '';
     var currentCoords = '';
+    var rowInBlock = 0; // 0-4 within each village's 5-row block
 
     $table.find('tbody tr, tr').not(':first').each(function() {
       var $row = $(this);
       var $cells = $row.find('td');
+      if ($cells.length < 3) return;
 
-      if ($cells.length < 3) return; // Skip non-data rows
-
-      // Check if this row has a village name link (= parent village row).
-      // Village name links contain coordinates like "(463|595)" in their text.
-      // Action links ("Príkazy", "Vojenské jednotky") also match a[href*="village="]
-      // but do NOT contain coordinates — so we must distinguish them.
+      // Check for village name link (contains coordinates)
       var $villageLink = $();
       $row.find('a[href*="village="]').each(function() {
         var text = $.trim($(this).text());
         if (text.match(/\(\d{1,3}\|\d{1,3}\)/)) {
           $villageLink = $(this);
-          return false; // break
+          return false;
         }
       });
+
       if ($villageLink.length > 0) {
         var villageHref = $villageLink.attr('href') || '';
         var villageIdMatch = villageHref.match(/village=(\d+)/);
@@ -425,105 +430,115 @@
           var coordsMatch = linkText.match(/\((\d{1,3}\|\d{1,3})\)/);
           currentCoords = coordsMatch ? coordsMatch[1] : '';
           currentVillageName = linkText.replace(/\s*\(\d{1,3}\|\d{1,3}\)\s*K?\d*\s*$/, '').trim();
+          rowInBlock = 0; // Reset: first row of new village block
         }
       }
 
-      if (currentVillageId === 0) return; // No village context yet
+      if (currentVillageId === 0) return;
 
-      // Detect the row label (column 1): vlastné, v dedine, vonku, na ceste, celkovo
-      var labelCell = $.trim($cells.eq(1).text()).toLowerCase().replace(/\s+/g, ' ');
-      // For rows without village link, column 0 IS the label
-      if ($villageLink.length === 0) {
-        labelCell = $.trim($cells.eq(0).text()).toLowerCase().replace(/\s+/g, ' ');
-      }
-
-      // For "complete" view: skip all rows EXCEPT "celkovo" / "total" row
-      // Use includes() for robustness against extra whitespace or formatting
-      if (isCompleteView) {
-        var isTotalRow = (labelCell.indexOf('celkovo') !== -1 ||
-                          labelCell.indexOf('total') !== -1 ||
-                          labelCell.indexOf('gesamt') !== -1 ||
-                          labelCell.indexOf('łącznie') !== -1);
-        if (!isTotalRow) return;
-      }
-
-      // Determine which cells hold unit data
-      // If row has village link: units start at the column indices from parseUnitHeaders
-      // If sub-row (no village link): cells are shifted left by 1 (no village name column)
+      // Detect label from cell text
       var hasLink = $villageLink.length > 0;
+      var labelCell = $.trim(hasLink ? $cells.eq(1).text() : $cells.eq(0).text())
+        .toLowerCase().replace(/\s+/g, ' ');
+
+      // Map label to category, with modulo fallback
+      var category = LABEL_TO_CATEGORY[labelCell] || CATEGORY_ORDER[rowInBlock] || 'own_home';
+
+      // Parse unit counts
       var units = {};
       var total = 0;
-
       for (var unitType in unitColumns) {
         if (unitColumns.hasOwnProperty(unitType)) {
           var colIndex = unitColumns[unitType];
-          // Sub-rows without village link have 1 fewer column (no village name cell)
           var adjustedIndex = hasLink ? colIndex : colIndex - 1;
           var cellText = $cells.eq(adjustedIndex).text();
           var count = parseIntSafe(cellText);
           units[unitType] = count;
-          // Only count recognized units in the total (skip militia and other specials)
           if (ALL_UNITS.indexOf(unitType) !== -1) {
             total += count;
           }
         }
       }
 
-      // Store (don't aggregate — each view gives exactly 1 correct row per village)
-      villageMap[currentVillageId] = {
+      rows.push({
         id: currentVillageId,
         name: currentVillageName || ('Village ' + currentCoords),
         coords: currentCoords,
         units: units,
-        total: total
-      };
+        total: total,
+        category: category
+      });
+
+      rowInBlock++;
     });
 
-    // Convert map to array and compute derived fields
-    for (var vid in villageMap) {
-      if (!villageMap.hasOwnProperty(vid)) continue;
-      var v = villageMap[vid];
-
-      var offensiveCount = (v.units.axe || 0) + (v.units.light || 0);
-      if (settings.includeArchers) {
-        offensiveCount += (v.units.marcher || 0);
-      }
-      var isNuke = offensiveCount >= settings.nukeThreshold;
-      var hasNoble = (v.units.snob || 0) > 0;
-
-      villages.push({
-        id: v.id,
-        name: v.name,
-        coords: v.coords,
-        units: v.units,
-        total: v.total,
-        isNuke: isNuke,
-        hasNoble: hasNoble
-      });
-    }
-
-    // Default: no more pages
+    // Pagination
     var hasNextPage = false;
-
-    // Check if pagination exists
     var $navItems = $page.find('.paged-nav-item');
     if ($navItems.length > 1) {
-      // Find current selected page
       var $current = $navItems.filter('.selected, .active');
       if ($current.length > 0) {
         hasNextPage = $current.next('.paged-nav-item').length > 0;
       } else {
-        // No selected item found — check if there are page links beyond page 0
         hasNextPage = $page.find('a.paged-nav-item[href*="page="]').length > 0;
       }
     }
+    if (page >= 100) hasNextPage = false;
 
-    // Safety limit: stop after 100 pages max (1000 villages) to prevent runaway
-    if (page >= 100) {
-      hasNextPage = false;
+    return { rows: rows, hasNextPage: hasNextPage };
+  }
+
+  /**
+   * Split raw parsed rows into 5 category buckets and compute derived fields.
+   * @param {Array} rows - Raw rows from parseCompleteOverview.
+   * @returns {Object.<string, VillageTroops[]>} Map of category to village troop arrays.
+   */
+  function splitIntoCategories(rows) {
+    var buckets = {
+      own_home: {},
+      in_village: {},
+      outside: {},
+      in_transit: {},
+      own_all: {}
+    };
+
+    rows.forEach(function(row) {
+      var cat = row.category;
+      if (!buckets[cat]) return;
+
+      // Use village ID as key to deduplicate (pagination may overlap)
+      buckets[cat][row.id] = {
+        id: row.id,
+        name: row.name,
+        coords: row.coords,
+        units: row.units,
+        total: row.total
+      };
+    });
+
+    // Convert each bucket from map to array with derived fields
+    var result = {};
+    for (var cat in buckets) {
+      if (!buckets.hasOwnProperty(cat)) continue;
+      var arr = [];
+      for (var vid in buckets[cat]) {
+        if (!buckets[cat].hasOwnProperty(vid)) continue;
+        var v = buckets[cat][vid];
+        var offensiveCount = (v.units.axe || 0) + (v.units.light || 0);
+        if (settings.includeArchers) offensiveCount += (v.units.marcher || 0);
+        arr.push({
+          id: v.id,
+          name: v.name,
+          coords: v.coords,
+          units: v.units,
+          total: v.total,
+          isNuke: offensiveCount >= settings.nukeThreshold,
+          hasNoble: (v.units.snob || 0) > 0
+        });
+      }
+      result[cat] = arr;
     }
-
-    return { villages: villages, hasNextPage: hasNextPage };
+    return result;
   }
 
   /**
@@ -953,15 +968,24 @@
      * @private
      */
     function bindViewSelector($container) {
+      // View change: just switch the bucket (no re-fetch needed — all views cached)
       $container.on('change', '#' + ID_PREFIX + 'view-type', function() {
         currentViewType = $(this).val();
         Store.set('view_type', currentViewType);
-        troopData = [];
-        fetchTroopDataWithUI($container, true);
+        if (allTroopData[currentViewType]) {
+          troopData = allTroopData[currentViewType];
+          renderTroops($container, troopData);
+        } else {
+          // Data not loaded yet
+          troopData = [];
+          fetchTroopDataWithUI($container, false);
+        }
       });
+      // Group change: must re-fetch (server-side filter)
       $container.on('change', '#' + ID_PREFIX + 'group-id', function() {
         currentGroupId = $(this).val();
         Store.set('group_id', currentGroupId);
+        allTroopData = {};
         troopData = [];
         fetchTroopDataWithUI($container, true);
       });
@@ -1097,7 +1121,8 @@
    */
   function fetchTroopDataWithUI($panel, force) {
     if (force) {
-      TWTools.Storage.remove(STORAGE_PREFIX + 'troop_data_' + currentViewType + '_g' + currentGroupId);
+      TWTools.Storage.remove(STORAGE_PREFIX + 'troop_all_g' + currentGroupId);
+      allTroopData = {};
       troopData = [];
     }
 
@@ -1566,10 +1591,14 @@
     // Initial render — troops tab
     var $troopsPanel = card.getTabContent('troops');
 
-    // Try to load cached data for current view type
-    var cachedTroops = Store.getCache('troop_data_' + currentViewType + '_g' + currentGroupId);
+    // Try to load cached all-views data
+    var cachedAll = Store.getCache('troop_all_g' + currentGroupId);
+    if (cachedAll && cachedAll.own_home) {
+      allTroopData = cachedAll;
+      troopData = allTroopData[currentViewType] || [];
+    }
+    var cachedTroops = troopData;
     if (cachedTroops && cachedTroops.length > 0) {
-      troopData = cachedTroops;
       // Recalculate nuke status with current settings
       recalculateNukeStatus();
       renderTroops($troopsPanel, troopData);
