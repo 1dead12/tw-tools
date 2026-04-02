@@ -113,6 +113,12 @@
   /** @type {string} Currently selected view type for troops overview */
   var currentViewType = 'own_home';
 
+  /** @type {string} Currently selected group ID ('0' = all villages) */
+  var currentGroupId = '0';
+
+  /** @type {Array.<{id: string, name: string}>} Available village groups */
+  var availableGroups = [{ id: '0', name: 'All villages' }];
+
   // ============================================================
   // STORAGE (wraps TWTools.Storage with local prefix)
   // ============================================================
@@ -172,9 +178,11 @@
     var saved = Store.get('settings', null);
     settings = $.extend(true, {}, DEFAULT_SETTINGS, saved || {});
 
-    // Load persisted view type
+    // Load persisted view type and group
     var savedView = Store.get('view_type', 'own_home');
     currentViewType = savedView || 'own_home';
+    var savedGroup = Store.get('group_id', '0');
+    currentGroupId = savedGroup || '0';
   }
 
   /**
@@ -217,6 +225,19 @@
       }
     }
     return 'own_home';
+  }
+
+  /**
+   * Get the display label for the currently selected group.
+   * @returns {string} Group label.
+   */
+  function getGroupLabel() {
+    for (var i = 0; i < availableGroups.length; i++) {
+      if (availableGroups[i].id === currentGroupId) {
+        return availableGroups[i].name;
+      }
+    }
+    return 'All villages';
   }
 
   // ============================================================
@@ -266,8 +287,8 @@
    * @param {function(string)} statusCb - Status update callback.
    */
   function fetchTroopData(callback, statusCb) {
-    // Cache key includes view type so different views are cached independently
-    var cacheKey = 'troop_data_' + currentViewType;
+    // Cache key includes view type AND group so combinations are cached independently
+    var cacheKey = 'troop_data_' + currentViewType + '_g' + currentGroupId;
 
     // Check cache first
     var cached = Store.getCache(cacheKey);
@@ -295,7 +316,8 @@
      * @private
      */
     function fetchPage() {
-      var url = '/game.php?screen=overview_villages&mode=units&type=' + urlTypeParam + '&page=' + page;
+      var groupParam = (currentGroupId && currentGroupId !== '0') ? '&group=' + currentGroupId : '';
+      var url = '/game.php?screen=overview_villages&mode=units&type=' + urlTypeParam + groupParam + '&page=' + page;
 
       $.ajax({
         url: url,
@@ -914,6 +936,16 @@
     }
     viewSelectHtml += '</select></label>';
 
+    // Build group selector dropdown HTML
+    var groupSelectHtml = '<label style="font-size:10px;margin-left:6px;">Group: ' +
+      '<select id="' + ID_PREFIX + 'group-id" style="font-size:10px;">';
+    for (var gi = 0; gi < availableGroups.length; gi++) {
+      groupSelectHtml += '<option value="' + availableGroups[gi].id + '"' +
+        (currentGroupId === availableGroups[gi].id ? ' selected' : '') + '>' +
+        escapeHtml(availableGroups[gi].name) + '</option>';
+    }
+    groupSelectHtml += '</select></label>';
+
     /**
      * Bind the view selector change event.
      * Clears cache for the old view type, updates currentViewType, persists, and re-fetches.
@@ -924,7 +956,12 @@
       $container.on('change', '#' + ID_PREFIX + 'view-type', function() {
         currentViewType = $(this).val();
         Store.set('view_type', currentViewType);
-        // Clear old troop data and re-fetch with new view type
+        troopData = [];
+        fetchTroopDataWithUI($container, true);
+      });
+      $container.on('change', '#' + ID_PREFIX + 'group-id', function() {
+        currentGroupId = $(this).val();
+        Store.set('group_id', currentGroupId);
         troopData = [];
         fetchTroopDataWithUI($container, true);
       });
@@ -935,7 +972,7 @@
         '<div style="padding:8px;">' +
         '<button class="btn" id="' + ID_PREFIX + 'fetch-troops" style="margin-bottom:8px;">Fetch Troops</button> ' +
         '<button class="btn" id="' + ID_PREFIX + 'refresh-troops" style="margin-bottom:8px;">Force Refresh</button>' +
-        viewSelectHtml +
+        viewSelectHtml + groupSelectHtml +
         '<p style="color:#7a6840;">No troop data. Click "Fetch Troops" to load.</p>' +
         '</div>'
       );
@@ -965,14 +1002,15 @@
     // Toolbar
     var html = '<div style="margin-bottom:4px;">' +
       '<button class="btn" id="' + ID_PREFIX + 'fetch-troops" style="font-size:9px;">Refresh</button> ' +
-      viewSelectHtml + ' ' +
+      viewSelectHtml + groupSelectHtml + ' ' +
       '<button class="btn" id="' + ID_PREFIX + 'export-bbcode" style="font-size:9px;">BBCode</button> ' +
       '<button class="btn" id="' + ID_PREFIX + 'export-csv" style="font-size:9px;">CSV</button>' +
       '</div>';
 
     // Army summary box
     html += '<div style="margin-bottom:6px;padding:4px;background:#f0e0b0;border:1px solid #c0a060;border-radius:2px;">' +
-      '<b>Army Summary</b> <span style="font-size:9px;color:#7a6840;">(' + escapeHtml(getViewLabel()) + ')</span><br/>' +
+      '<b>Army Summary</b> <span style="font-size:9px;color:#7a6840;">(' + escapeHtml(getViewLabel()) +
+        (currentGroupId !== '0' ? ' / ' + escapeHtml(getGroupLabel()) : '') + ')</span><br/>' +
       'Offensive Power: <span style="color:#cc0000;font-weight:bold;">' + formatNum(summary.offPower) + '</span> &nbsp;|&nbsp; ' +
       'Defensive Power: <span style="color:#2e7d32;font-weight:bold;">' + formatNum(summary.defPower) + '</span><br/>' +
       'Nukes (' + settings.nukeThreshold + '+ off): <span style="font-weight:bold;">' + summary.nukeCount + '</span> &nbsp;|&nbsp; ' +
@@ -1059,7 +1097,7 @@
    */
   function fetchTroopDataWithUI($panel, force) {
     if (force) {
-      TWTools.Storage.remove(STORAGE_PREFIX + 'troop_data_' + currentViewType);
+      TWTools.Storage.remove(STORAGE_PREFIX + 'troop_data_' + currentViewType + '_g' + currentGroupId);
       troopData = [];
     }
 
@@ -1472,6 +1510,28 @@
   function init() {
     loadSettings();
 
+    // Fetch available village groups in background (populates dropdown)
+    TWTools.DataFetcher.fetchGroups(function(groups) {
+      availableGroups = groups;
+      // Validate saved group ID still exists
+      var found = false;
+      for (var i = 0; i < groups.length; i++) {
+        if (groups[i].id === currentGroupId) { found = true; break; }
+      }
+      if (!found) currentGroupId = '0';
+      // Re-render group dropdown if card is already showing
+      var $groupSelect = $('#' + ID_PREFIX + 'group-id');
+      if ($groupSelect.length > 0) {
+        $groupSelect.empty();
+        for (var j = 0; j < availableGroups.length; j++) {
+          $groupSelect.append(
+            $('<option/>').val(availableGroups[j].id).text(availableGroups[j].name)
+          );
+        }
+        $groupSelect.val(currentGroupId);
+      }
+    });
+
     var card = TWTools.UI.createCard({
       id: ID_PREFIX + 'main',
       title: 'Troop Overview',
@@ -1507,7 +1567,7 @@
     var $troopsPanel = card.getTabContent('troops');
 
     // Try to load cached data for current view type
-    var cachedTroops = Store.getCache('troop_data_' + currentViewType);
+    var cachedTroops = Store.getCache('troop_data_' + currentViewType + '_g' + currentGroupId);
     if (cachedTroops && cachedTroops.length > 0) {
       troopData = cachedTroops;
       // Recalculate nuke status with current settings

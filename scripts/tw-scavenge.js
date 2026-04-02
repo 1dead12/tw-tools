@@ -994,43 +994,69 @@
       unitTypes.forEach(function(u) { remainingTroops[u] = available[u]; });
 
       if (mode === 'balanced') {
-        // BALANCED: Split troops evenly across all active tiers.
-        // Each tier gets 1/N of each unit type. Duration is whatever the
-        // even split produces — the target duration serves as a max cap.
-        var numTiers = activeTiers.length;
+        // BALANCED: Calculate troops so all tiers have approximately EQUAL DURATION.
+        // Each tier has different formula params, so equal carry ≠ equal duration.
+        // We find a target duration T such that the sum of required capacities
+        // across all tiers equals total available carry capacity.
 
-        activeTiers.forEach(function(tierNum, tierIdx) {
+        // Step 1: Compute total available carry capacity
+        var totalCarry = 0;
+        unitTypes.forEach(function(u) {
+          totalCarry += (remainingTroops[u] || 0) * (UNIT_HAUL[u] || 0);
+        });
+
+        // Step 2: Binary search for target duration T where sum of
+        // requiredCapacity(T, tier) across all tiers ≈ totalCarry, capped at maxDuration.
+        var minT = 0;
+        var maxT = targetDurationSec;
+
+        // Check if total carry can fill all tiers to maxDuration
+        var capAtMax = 0;
+        activeTiers.forEach(function(tierNum) {
+          var p = tierParams[tierNum - 1];
+          if (p) capAtMax += Calculator.requiredCapacity(maxT, p);
+        });
+        // If we don't have enough troops to fill all tiers to max, binary search
+        if (totalCarry < capAtMax) {
+          // Find the lowest tier's initial_seconds as lower bound
+          activeTiers.forEach(function(tierNum) {
+            var p = tierParams[tierNum - 1];
+            if (p && p.duration_initial_seconds > minT) {
+              minT = p.duration_initial_seconds;
+            }
+          });
+
+          for (var iter = 0; iter < 40; iter++) { // 40 iterations ≈ 1-second precision
+            var midT = (minT + maxT) / 2;
+            var sumCap = 0;
+            activeTiers.forEach(function(tierNum) {
+              var p = tierParams[tierNum - 1];
+              if (p) sumCap += Calculator.requiredCapacity(midT, p);
+            });
+            if (sumCap > totalCarry) {
+              maxT = midT;
+            } else {
+              minT = midT;
+            }
+          }
+        }
+        // minT is now the balanced target duration (or targetDurationSec if we have excess troops)
+        var balancedDuration = Math.min(minT, targetDurationSec);
+
+        // Step 3: Allocate troops per tier to match that balanced duration
+        activeTiers.forEach(function(tierNum) {
           var params = tierParams[tierNum - 1];
           if (!params) return;
 
-          var alloc = {};
+          var targetCap = Calculator.requiredCapacity(balancedDuration, params);
+          if (targetCap <= 0) targetCap = 1;
+
+          var alloc = Calculator.allocateTroops(remainingTroops, targetCap, unitTypes);
+
           var actualCapacity = 0;
-          var isLastTier = (tierIdx === numTiers - 1);
-          var tiersLeft = numTiers - tierIdx;
-
-          unitTypes.forEach(function(u) {
-            var avail = remainingTroops[u] || 0;
-            if (avail <= 0) { alloc[u] = 0; return; }
-
-            // Last tier gets all remaining; others get 1/tiersLeft
-            alloc[u] = isLastTier ? avail : Math.floor(avail / tiersLeft);
-            actualCapacity += alloc[u] * (UNIT_HAUL[u] || 0);
-          });
-
-          // Cap at target duration — scale down if this split exceeds it
-          var maxCapForDuration = Calculator.requiredCapacity(targetDurationSec, params);
-          if (actualCapacity > maxCapForDuration && maxCapForDuration > 0) {
-            var scale = maxCapForDuration / actualCapacity;
-            actualCapacity = 0;
-            unitTypes.forEach(function(u) {
-              alloc[u] = Math.floor((alloc[u] || 0) * scale);
-              actualCapacity += alloc[u] * (UNIT_HAUL[u] || 0);
-            });
-          }
-
-          // Subtract allocated from pool
           unitTypes.forEach(function(u) {
             remainingTroops[u] -= alloc[u] || 0;
+            actualCapacity += (alloc[u] || 0) * (UNIT_HAUL[u] || 0);
           });
 
           if (actualCapacity > 0) {
