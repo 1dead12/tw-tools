@@ -302,7 +302,7 @@
         dataType: 'html',
         timeout: 15000,
         success: function(html) {
-          var result = parseCombinedOverview(html, page);
+          var result = parseCombinedOverview(html, page, urlTypeParam);
           allTroops = allTroops.concat(result.villages);
 
           if (statusCb) {
@@ -338,7 +338,7 @@
    * @param {number} [page=0] - Current page index (0-based), used for safety limit.
    * @returns {{villages: VillageTroops[], hasNextPage: boolean}} Parsed data.
    */
-  function parseCombinedOverview(html, page) {
+  function parseCombinedOverview(html, page, urlTypeParam) {
     var $page = $('<div/>').html(html);
     var villages = [];
 
