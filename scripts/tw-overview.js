@@ -400,6 +400,7 @@
 
     // Parse header to identify unit columns (complete view always has proper headers)
     var unitColumns = parseUnitHeaders($table);
+    var headerColumnCount = $table.find('tr:first th, thead th').length;
 
     var currentVillageId = 0;
     var currentVillageName = '';
@@ -444,13 +445,21 @@
       // Map label to category, with modulo fallback
       var category = LABEL_TO_CATEGORY[labelCell] || CATEGORY_ORDER[rowInBlock] || 'own_home';
 
-      // Parse unit counts
+      // Parse unit counts.
+      // Parent rows (with village link) have same cell count as header → offset 0.
+      // Sub-rows (no village link) are always missing 1 cell at the start (village name).
+      // Some sub-rows also miss the action cell at the END, but that doesn't affect
+      // unit column offsets since it's after all unit columns.
+      // So offset is always: 0 for parent rows, 1 for sub-rows.
+      var cellOffset = hasLink ? 0 : 1;
+
       var units = {};
       var total = 0;
       for (var unitType in unitColumns) {
         if (unitColumns.hasOwnProperty(unitType)) {
           var colIndex = unitColumns[unitType];
-          var adjustedIndex = hasLink ? colIndex : colIndex - 1;
+          var adjustedIndex = colIndex - cellOffset;
+          if (adjustedIndex < 0) adjustedIndex = 0;
           var cellText = $cells.eq(adjustedIndex).text();
           var count = parseIntSafe(cellText);
           units[unitType] = count;
