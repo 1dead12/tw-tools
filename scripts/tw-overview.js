@@ -95,11 +95,11 @@
    * @type {Array.<{value: string, label: string}>}
    */
   var VIEW_TYPES = [
-    { value: 'own_home', label: 'Own (home)' },
-    { value: 'own_all', label: 'Own (all)' },
-    { value: 'in_village', label: 'In village' },
-    { value: 'outside', label: 'Outside' },
-    { value: 'in_transit', label: 'In transit' }
+    { value: 'own_home', label: 'Own (home)', urlType: 'own_home' },
+    { value: 'own_all', label: 'Own (all)', urlType: 'complete' },
+    { value: 'in_village', label: 'In village', urlType: 'there' },
+    { value: 'outside', label: 'Outside', urlType: 'away', urlExtra: '&filter_villages=1' },
+    { value: 'in_transit', label: 'In transit', urlType: 'moving', urlExtra: '&filter_villages=1' }
   ];
 
   /** Default settings */
@@ -205,6 +205,20 @@
     return 'Own (home)';
   }
 
+  /**
+   * Get the URL type parameter for the currently selected view.
+   * Maps our internal view names to the game's actual URL type values.
+   * @returns {string} URL type parameter string (may include &filter_villages=1).
+   */
+  function getViewUrlParam() {
+    for (var i = 0; i < VIEW_TYPES.length; i++) {
+      if (VIEW_TYPES[i].value === currentViewType) {
+        return VIEW_TYPES[i].urlType + (VIEW_TYPES[i].urlExtra || '');
+      }
+    }
+    return 'own_home';
+  }
+
   // ============================================================
   // DATA STRUCTURES
   // ============================================================
@@ -274,13 +288,14 @@
     var allTroops = [];
     var page = 0;
     var viewType = currentViewType;
+    var urlTypeParam = getViewUrlParam();
 
     /**
-     * Fetch a single page of the combined overview.
+     * Fetch a single page of the units overview.
      * @private
      */
     function fetchPage() {
-      var url = '/game.php?screen=overview_villages&mode=units&type=' + viewType + '&page=' + page;
+      var url = '/game.php?screen=overview_villages&mode=units&type=' + urlTypeParam + '&page=' + page;
 
       $.ajax({
         url: url,
