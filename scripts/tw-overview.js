@@ -404,7 +404,11 @@
       // TW shows this when group has 0 matching villages
       if (infoText.indexOf('nepatr') !== -1 || infoText.indexOf('belong') !== -1 ||
           infoText.indexOf('gehört') !== -1 || infoText.indexOf('no villages') !== -1) {
-        return { rows: [], hasNextPage: false, emptyGroup: infoText };
+        // Extract just the first sentence (before criteria/links)
+        var firstSentence = infoText.split(/[.\n]/).filter(function(s) {
+          return s.trim().length > 10;
+        })[0] || infoText;
+        return { rows: [], hasNextPage: false, emptyGroup: firstSentence.trim() };
       }
     }
 
