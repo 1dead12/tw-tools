@@ -359,67 +359,84 @@
     // Parse header to identify unit columns
     var unitColumns = parseUnitHeaders($table);
 
-    // Parse data rows — ONLY actual village rows.
-    // Village rows have coordinates like "(407|513)" in the first cell.
-    // Summary rows ("Príkazy", "Vojenské jednotky") do NOT have coordinates.
-    // Aggregate by village ID — some views show the same village multiple times.
+    // Parse data rows from the units overview table.
+    // Table structure per village:
+    //   - For single-row views (own_home, there, away, moving):
+    //     Row has: [village_name+coords] [label] [spear] [sword] ... [Akcia]
+    //   - For multi-row view (complete/all):
+    //     Parent row: [village_name+coords] [vlastné] [counts...] [Príkazy]
+    //     Sub-rows:   [v dedine] [counts...] [Vojenské jednotky]
+    //                 [vonku] [counts...]
+    //                 [na ceste] [counts...] [Príkazy]
+    //                 [celkovo] [counts...] [Vojenské jednotky]
+    //     For "complete" view, we want the "celkovo" (total) row.
     var villageMap = {};
+    var isCompleteView = (urlTypeParam === 'complete');
+    var currentVillageId = 0;
+    var currentVillageName = '';
+    var currentCoords = '';
+
     $table.find('tbody tr, tr').not(':first').each(function() {
       var $row = $(this);
       var $cells = $row.find('td');
 
       if ($cells.length < 3) return; // Skip non-data rows
 
-      // DEFINITIVE filter: row must contain coordinates (NNN|NNN)
-      var rowText = $row.text();
-      var coordsMatch = rowText.match(/\((\d{1,3}\|\d{1,3})\)/);
-      if (!coordsMatch) return; // Not a village row — skip
-      var coords = coordsMatch[1];
-
-      // Must have a village link
+      // Check if this row has a village link (= parent village row)
       var $villageLink = $row.find('a[href*="village="]').first();
-      if ($villageLink.length === 0) return;
+      if ($villageLink.length > 0) {
+        var villageHref = $villageLink.attr('href') || '';
+        var villageIdMatch = villageHref.match(/village=(\d+)/);
+        if (villageIdMatch) {
+          currentVillageId = parseInt(villageIdMatch[1], 10);
+          var linkText = $.trim($villageLink.text());
+          var coordsMatch = linkText.match(/\((\d{1,3}\|\d{1,3})\)/);
+          currentCoords = coordsMatch ? coordsMatch[1] : '';
+          currentVillageName = linkText.replace(/\s*\(\d{1,3}\|\d{1,3}\)\s*K?\d*\s*$/, '').trim();
+        }
+      }
 
-      var villageHref = $villageLink.attr('href') || '';
-      var villageIdMatch = villageHref.match(/village=(\d+)/);
-      var villageId = villageIdMatch ? parseInt(villageIdMatch[1], 10) : 0;
-      if (villageId === 0) return;
+      if (currentVillageId === 0) return; // No village context yet
 
-      var villageName = $.trim($villageLink.text());
-      villageName = villageName.replace(/\s*\(\d{1,3}\|\d{1,3}\)\s*K?\d*\s*$/, '').trim();
+      // Detect the row label (column 1): vlastné, v dedine, vonku, na ceste, celkovo
+      var labelCell = $.trim($cells.eq(1).text()).toLowerCase();
+      // For rows without village link, column 0 IS the label
+      if ($villageLink.length === 0) {
+        labelCell = $.trim($cells.eq(0).text()).toLowerCase();
+      }
 
-      // Parse unit counts from cells
+      // For "complete" view: skip all rows EXCEPT "celkovo" (total)
+      if (isCompleteView) {
+        if (labelCell !== 'celkovo') return;
+      }
+
+      // Determine which cells hold unit data
+      // If row has village link: units start at the column indices from parseUnitHeaders
+      // If sub-row (no village link): cells are shifted left by 1 (no village name column)
+      var hasLink = $villageLink.length > 0;
       var units = {};
       var total = 0;
 
       for (var unitType in unitColumns) {
         if (unitColumns.hasOwnProperty(unitType)) {
           var colIndex = unitColumns[unitType];
-          var cellText = $cells.eq(colIndex).text();
+          // Sub-rows without village link have 1 fewer column (no village name cell)
+          var adjustedIndex = hasLink ? colIndex : colIndex - 1;
+          var cellText = $cells.eq(adjustedIndex).text();
           var count = parseIntSafe(cellText);
           units[unitType] = count;
           total += count;
         }
       }
 
-      // Aggregate: if village already seen, SUM the troop counts
-      if (villageMap[villageId]) {
-        var existing = villageMap[villageId];
-        for (var ut in units) {
-          if (units.hasOwnProperty(ut)) {
-            existing.units[ut] = (existing.units[ut] || 0) + (units[ut] || 0);
-          }
-        }
-        existing.total += total;
-      } else {
-        villageMap[villageId] = {
-          id: villageId,
-          name: villageName || ('Village ' + coords),
-          coords: coords,
-          units: units,
-          total: total
-        };
-      }
+      // Store (don't aggregate — each view gives exactly 1 correct row per village)
+      villageMap[currentVillageId] = {
+        id: currentVillageId,
+        name: currentVillageName || ('Village ' + currentCoords),
+        coords: currentCoords,
+        units: units,
+        total: total
+      };
     });
 
     // Convert map to array and compute derived fields
