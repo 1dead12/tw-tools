@@ -47,10 +47,10 @@
    * @type {Object[]}
    */
   var DEFAULT_TIER_PARAMS = [
-    { tier: 1, duration_initial_seconds: 1800, duration_factor: 0.25, duration_exponent: 0.45, loot_factor: 1.0 },
-    { tier: 2, duration_initial_seconds: 3600, duration_factor: 0.35, duration_exponent: 0.45, loot_factor: 0.75 },
-    { tier: 3, duration_initial_seconds: 5400, duration_factor: 0.45, duration_exponent: 0.45, loot_factor: 0.50 },
-    { tier: 4, duration_initial_seconds: 7200, duration_factor: 0.55, duration_exponent: 0.45, loot_factor: 0.25 }
+    { tier: 1, duration_initial_seconds: 1800, duration_factor: 1, duration_exponent: 0.45, loot_factor: 0.10 },
+    { tier: 2, duration_initial_seconds: 1800, duration_factor: 1, duration_exponent: 0.45, loot_factor: 0.25 },
+    { tier: 3, duration_initial_seconds: 1800, duration_factor: 1, duration_exponent: 0.45, loot_factor: 0.50 },
+    { tier: 4, duration_initial_seconds: 1800, duration_factor: 1, duration_exponent: 0.45, loot_factor: 0.75 }
   ];
 
   /**
@@ -233,11 +233,34 @@
      * @returns {Object[]} Tier parameter objects.
      */
     readTierParams: function() {
-      // Try to read from ScavengeScreen or inline JS config
+      // Method 1: Read from ScavengeScreen.village.options (single village scavenge page)
+      // Structure: ScavengeScreen.village.options = { "1": { base: { duration_factor, ... } }, ... }
+      if (typeof ScavengeScreen !== 'undefined' && ScavengeScreen.village && ScavengeScreen.village.options) {
+        var opts = ScavengeScreen.village.options;
+        var params = [];
+        for (var tierNum = 1; tierNum <= 4; tierNum++) {
+          var opt = opts[String(tierNum)];
+          if (opt && opt.base) {
+            var b = opt.base;
+            params.push({
+              tier: tierNum,
+              duration_initial_seconds: b.duration_initial_seconds || DEFAULT_TIER_PARAMS[tierNum - 1].duration_initial_seconds,
+              duration_factor: b.duration_factor || DEFAULT_TIER_PARAMS[tierNum - 1].duration_factor,
+              duration_exponent: b.duration_exponent || DEFAULT_TIER_PARAMS[tierNum - 1].duration_exponent,
+              loot_factor: b.loot_factor || DEFAULT_TIER_PARAMS[tierNum - 1].loot_factor
+            });
+          } else {
+            params.push(DEFAULT_TIER_PARAMS[tierNum - 1]);
+          }
+        }
+        if (params.length > 0) return params;
+      }
+
+      // Method 2: Try ScavengeScreen.options as array (legacy format)
       if (typeof ScavengeScreen !== 'undefined' && ScavengeScreen.options) {
-        var opts = ScavengeScreen.options;
-        if (opts.length) {
-          return opts.map(function(opt, idx) {
+        var arr = ScavengeScreen.options;
+        if (arr.length) {
+          return arr.map(function(opt, idx) {
             return {
               tier: idx + 1,
               duration_initial_seconds: opt.duration_initial_seconds || DEFAULT_TIER_PARAMS[idx].duration_initial_seconds,
@@ -249,7 +272,7 @@
         }
       }
 
-      // Try reading from global Scavenge config
+      // Method 3: Try global Scavenge config
       if (typeof Scavenge !== 'undefined' && Scavenge.data && Scavenge.data.options) {
         var data = Scavenge.data.options;
         if (data.length) {
@@ -1018,10 +1041,12 @@
         });
         // If we don't have enough troops to fill all tiers to max, binary search
         if (totalCarry < capAtMax) {
-          // Find the lowest tier's initial_seconds as lower bound
+          // Lower bound: use LOWEST tier's initial_seconds (tier with shortest base time).
+          // Below this, even tier 1 gets minimum troops. This gives the binary search
+          // a tight range to converge quickly.
           activeTiers.forEach(function(tierNum) {
             var p = tierParams[tierNum - 1];
-            if (p && p.duration_initial_seconds > minT) {
+            if (p && (minT === 0 || p.duration_initial_seconds < minT)) {
               minT = p.duration_initial_seconds;
             }
           });
