@@ -842,6 +842,14 @@
           // "DD.MM. HH:MM:SS" or "DD/MM HH:MM:SS" — older report, treat as expired (0)
         });
 
+        // Check if A/B buttons are disabled (attack already sent, troops en route)
+        // TW adds .farm_icon_disabled when you can't send, and .done after an attack is sent
+        var $btnA = $row.find('.farm_icon_a');
+        var hasActiveAttack = $btnA.length > 0 && (
+          $btnA.hasClass('done') ||
+          ($btnA.hasClass('farm_icon_disabled') && !$btnA.hasClass('start_locked'))
+        );
+
         // Wall level — sometimes shown in a cell
         $cells.each(function() {
           var text = $.trim($(this).text());
@@ -865,6 +873,7 @@
               maxLoot: maxLoot,
               wallLevel: wallLevel,
               lastReportMs: lastReportMs,
+              hasActiveAttack: hasActiveAttack,
               distance: 0
             });
           }
@@ -1085,11 +1094,13 @@
         var travelMs = TWTools.travelTime(distance, LC_SPEED, worldSpeed, unitSpeedFactor);
         var estimatedArrival = nowMs + travelMs;
 
+        // Skip targets with active attacks (Farm Assistant buttons disabled/done)
+        if (target.hasActiveAttack) continue;
+
         // Check cooldown: skip if last report is too recent
         // lastReportMs = time of last report (ms since midnight today, or 0 if older/unknown)
         if (target.lastReportMs > 0) {
           var timeSinceReport = nowMs - target.lastReportMs;
-          // Handle midnight wrap (report was "today" but time hasn't passed yet — very unlikely)
           if (timeSinceReport < 0) timeSinceReport += 86400000;
           if (timeSinceReport < cooldownMs) continue;
         }
