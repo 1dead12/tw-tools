@@ -40,6 +40,10 @@
   var isScanning = false, isFarming = false;
   var csrfToken = '', sendUnitsLink = '';
   var realTemplateA = null, realTemplateB = null;
+  /** @type {Object|null} Unit counts for template A, e.g. {light: 1} */
+  var templateAUnits = null;
+  /** @type {Object|null} Unit counts for template B, e.g. {light: 2} */
+  var templateBUnits = null;
   var farmSentCount = 0, farmErrorCount = 0, enterKeyBound = false;
 
   // ---- Format helpers ----
@@ -81,17 +85,23 @@
     })();
   }
 
+  /** Unit types to parse from overview table headers */
+  var UNIT_NAMES = ['spear','sword','axe','archer','spy','light','marcher','heavy','ram','catapult','knight','snob'];
+
   function parseSourceVillages(html) {
     var $p = $('<div/>').html(html), villages = [];
     var $t = $p.find('#units_table, table.vis.overview_table');
     if (!$t.length) $t = $p.find('table.vis').filter(function() { return $(this).find('tr').length > 2; }).first();
     if (!$t.length) return { villages: [], hasNextPage: false };
 
-    var lcCol = -1;
+    // Map header columns to unit types
+    var unitCols = {};
     $t.find('tr:first th, thead th').each(function(idx) {
-      if ($(this).find('img[src*="unit_light"]').length) { lcCol = idx; return false; }
-      var txt = $.trim($(this).text()).toLowerCase();
-      if (txt === 'light' || txt === 'lc' || txt === 'lk') { lcCol = idx; return false; }
+      var $img = $(this).find('img[src*="unit_"]');
+      if ($img.length) {
+        var m = ($img.attr('src') || '').match(/unit_(\w+)/);
+        if (m && UNIT_NAMES.indexOf(m[1]) !== -1) unitCols[m[1]] = idx;
+      }
     });
 
     $t.find('tbody tr, tr').not(':first').each(function() {
@@ -106,11 +116,19 @@
       if (!vm) return;
       var lt = $.trim($vl.text()), cm = lt.match(/\((\d{1,3}\|\d{1,3})\)/);
       var coords = cm ? cm[1] : '', name = lt.replace(/\s*\(\d{1,3}\|\d{1,3}\)\s*K?\d*\s*$/, '').trim();
-      var lc = (lcCol >= 0 && lcCol < $c.length) ? pInt($c.eq(lcCol).text()) : 0;
+
+      // Read all unit counts
+      var units = {};
+      for (var u in unitCols) {
+        if (unitCols.hasOwnProperty(u)) {
+          units[u] = (unitCols[u] < $c.length) ? pInt($c.eq(unitCols[u]).text()) : 0;
+        }
+      }
+      var lc = units.light || 0;
       var parsed = TWTools.parseCoords(coords);
       if (!parsed) return;
       villages.push({ id: parseInt(vm[1], 10), name: name || ('Village ' + coords), coords: coords,
-        coordsParsed: parsed, lcAvailable: lc, lcTotal: lc, targetsInRange: 0, status: 'ready' });
+        coordsParsed: parsed, units: units, lcAvailable: lc, lcTotal: lc, targetsInRange: 0, status: 'ready' });
     });
 
     var hasNext = false;
@@ -183,8 +201,14 @@
     try {
       if (typeof Accountmanager !== 'undefined' && Accountmanager.farm && Accountmanager.farm.templates) {
         var keys = Object.keys(Accountmanager.farm.templates).filter(function(k) { return k.indexOf('t_') === 0; }).sort();
-        if (keys.length >= 1) realTemplateA = parseInt(keys[0].replace('t_', ''), 10);
-        if (keys.length >= 2) realTemplateB = parseInt(keys[1].replace('t_', ''), 10);
+        if (keys.length >= 1) {
+          realTemplateA = parseInt(keys[0].replace('t_', ''), 10);
+          templateAUnits = Accountmanager.farm.templates[keys[0]] || null;
+        }
+        if (keys.length >= 2) {
+          realTemplateB = parseInt(keys[1].replace('t_', ''), 10);
+          templateBUnits = Accountmanager.farm.templates[keys[1]] || null;
+        }
       }
     } catch (e) {}
     try { if (typeof Accountmanager !== 'undefined' && Accountmanager.send_units_link) sendUnitsLink = Accountmanager.send_units_link; } catch (e) {}
@@ -401,8 +425,47 @@
 
     var ws = 1, usf = 1;
     if (TWTools.DataFetcher._worldConfig) { ws = TWTools.DataFetcher._worldConfig.speed || 1; usf = TWTools.DataFetcher._worldConfig.unitSpeed || 1; }
-    var planned = {}, lcPool = {}, nowMs = TWTools.TimeSync.now(), cdMs = settings.cooldownMinutes * 60000;
-    for (var si = 0; si < sourceVillages.length; si++) lcPool[sourceVillages[si].id] = sourceVillages[si].lcAvailable;
+    var planned = {}, nowMs = TWTools.TimeSync.now(), cdMs = settings.cooldownMinutes * 60000;
+
+    // Build per-village unit pools (copy of available units, decremented as we plan)
+    var unitPools = {};
+    for (var si = 0; si < sourceVillages.length; si++) {
+      var sv = sourceVillages[si];
+      unitPools[sv.id] = {};
+      for (var u in (sv.units || {})) {
+        if (sv.units.hasOwnProperty(u)) unitPools[sv.id][u] = sv.units[u];
+      }
+    }
+
+    /**
+     * Check if source village has enough units for a template.
+     * @param {number} srcId - Source village ID.
+     * @param {Object|null} tmplUnits - Template unit requirements, e.g. {light:1, spy:1}.
+     * @returns {boolean} True if all required units are available.
+     */
+    function hasEnoughUnits(srcId, tmplUnits) {
+      if (!tmplUnits) return true; // No template data — assume OK (minLC fallback)
+      var pool = unitPools[srcId];
+      if (!pool) return false;
+      for (var unit in tmplUnits) {
+        if (tmplUnits.hasOwnProperty(unit) && tmplUnits[unit] > 0) {
+          if ((pool[unit] || 0) < tmplUnits[unit]) return false;
+        }
+      }
+      return true;
+    }
+
+    /** Deduct template units from pool after planning an attack */
+    function deductUnits(srcId, tmplUnits) {
+      if (!tmplUnits) return;
+      var pool = unitPools[srcId];
+      if (!pool) return;
+      for (var unit in tmplUnits) {
+        if (tmplUnits.hasOwnProperty(unit) && tmplUnits[unit] > 0) {
+          pool[unit] = (pool[unit] || 0) - tmplUnits[unit];
+        }
+      }
+    }
 
     for (var i = 0; i < sourceVillages.length; i++) {
       var src = sourceVillages[i], byDist = [];
@@ -413,8 +476,24 @@
       byDist.sort(function(a, b) { return a.distance - b.distance; });
 
       for (var k = 0; k < byDist.length; k++) {
-        if (lcPool[src.id] < settings.minLC) break;
         var tgt = byDist[k].target, dist = byDist[k].distance;
+
+        // Determine template
+        var tmplId = realTemplateA, tmplLbl = 'A', tmplUnits = templateAUnits;
+        if (settings.useBForMaxLoot && tgt.maxLoot && realTemplateB !== null) {
+          tmplId = realTemplateB; tmplLbl = 'B'; tmplUnits = templateBUnits;
+        }
+
+        // Check if source has enough units for this template
+        if (!hasEnoughUnits(src.id, tmplUnits)) {
+          // If B template doesn't fit, try A as fallback
+          if (tmplLbl === 'B' && hasEnoughUnits(src.id, templateAUnits)) {
+            tmplId = realTemplateA; tmplLbl = 'A'; tmplUnits = templateAUnits;
+          } else {
+            break; // No units left for any template from this village
+          }
+        }
+
         var travelMs = TWTools.travelTime(dist, LC_SPEED, ws, usf), estArr = nowMs + travelMs;
 
         if (tgt.hasActiveAttack) continue;
@@ -427,16 +506,13 @@
         for (var p = 0; p < pf.length; p++) { if (Math.abs(pf[p] - estArr) < cdMs) { selfHit = true; break; } }
         if (selfHit) continue;
 
-        var tmplId = realTemplateA, tmplLbl = 'A';
-        if (settings.useBForMaxLoot && tgt.maxLoot && realTemplateB !== null) { tmplId = realTemplateB; tmplLbl = 'B'; }
-
         farmPlan.push({ sourceId: src.id, sourceName: src.name, sourceCoords: src.coords,
           targetId: tgt.id, targetCoords: tgt.coords, distance: dist,
           templateId: tmplId, templateLabel: tmplLbl, travelTimeMs: travelMs, estArrival: fmtTime(estArr) });
 
         if (!planned[tgt.coords]) planned[tgt.coords] = [];
         planned[tgt.coords].push(estArr);
-        lcPool[src.id] -= settings.minLC;
+        deductUnits(src.id, tmplUnits);
       }
     }
     if (statusCb) statusCb('Plan: ' + farmPlan.length + ' attacks across ' + sourceVillages.length + ' villages.');
