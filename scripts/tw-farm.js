@@ -819,10 +819,32 @@
           maxLoot = true;
         }
 
+        // Last report time — column with "dnes HH:MM:SS" or "DD.MM. HH:MM:SS"
+        var lastReportMs = 0;
+        $cells.each(function() {
+          var text = $.trim($(this).text());
+          // "dnes HH:MM:SS" = today at HH:MM:SS
+          var todayMatch = text.match(/dnes\s+(\d{1,2}):(\d{2}):(\d{2})/i);
+          if (todayMatch) {
+            lastReportMs = (parseInt(todayMatch[1], 10) * 3600 +
+              parseInt(todayMatch[2], 10) * 60 +
+              parseInt(todayMatch[3], 10)) * 1000;
+            return;
+          }
+          // "today HH:MM:SS" (English)
+          var todayMatchEn = text.match(/today\s+(\d{1,2}):(\d{2}):(\d{2})/i);
+          if (todayMatchEn) {
+            lastReportMs = (parseInt(todayMatchEn[1], 10) * 3600 +
+              parseInt(todayMatchEn[2], 10) * 60 +
+              parseInt(todayMatchEn[3], 10)) * 1000;
+            return;
+          }
+          // "DD.MM. HH:MM:SS" or "DD/MM HH:MM:SS" — older report, treat as expired (0)
+        });
+
         // Wall level — sometimes shown in a cell
         $cells.each(function() {
           var text = $.trim($(this).text());
-          // Wall level is usually a small number in its own cell
           if (text.match(/^\d{1,2}$/) && !text.match(/\|/)) {
             var candidate = parseInt(text, 10);
             if (candidate <= 20 && candidate >= 0) {
@@ -842,6 +864,7 @@
               lootStatus: lootStatus,
               maxLoot: maxLoot,
               wallLevel: wallLevel,
+              lastReportMs: lastReportMs,
               distance: 0
             });
           }
@@ -1028,6 +1051,7 @@
     }
 
     var nowMs = TWTools.TimeSync.now();
+    var cooldownMs = settings.cooldownMinutes * 60 * 1000;
 
     for (var i = 0; i < sourceVillages.length; i++) {
       var src = sourceVillages[i];
@@ -1061,12 +1085,20 @@
         var travelMs = TWTools.travelTime(distance, LC_SPEED, worldSpeed, unitSpeedFactor);
         var estimatedArrival = nowMs + travelMs;
 
-        // Check collision with existing attacks
+        // Check cooldown: skip if last report is too recent
+        // lastReportMs = time of last report (ms since midnight today, or 0 if older/unknown)
+        if (target.lastReportMs > 0) {
+          var timeSinceReport = nowMs - target.lastReportMs;
+          // Handle midnight wrap (report was "today" but time hasn't passed yet — very unlikely)
+          if (timeSinceReport < 0) timeSinceReport += 86400000;
+          if (timeSinceReport < cooldownMs) continue;
+        }
+
+        // Check collision with existing outgoing attacks
         if (hasCollision(target.coords, estimatedArrival)) continue;
 
         // Check collision with already-planned attacks in this batch
         var plannedForTarget = plannedArrivals[target.coords] || [];
-        var cooldownMs = settings.cooldownMinutes * 60 * 1000;
         var selfCollision = false;
         for (var p = 0; p < plannedForTarget.length; p++) {
           if (Math.abs(plannedForTarget[p] - estimatedArrival) < cooldownMs) {
