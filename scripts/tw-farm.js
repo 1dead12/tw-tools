@@ -682,16 +682,20 @@
       if (hMatch && !csrf) csrf = hMatch[1];
     });
 
-    // Extract real template IDs from Accountmanager.farm (the A/B buttons use these IDs)
+    // Extract real template IDs from Accountmanager.farm
+    // Templates are stored as t_NNNN keys (e.g., t_3640, t_3641), NOT as .a/.b
+    // The first template = A, second = B (sorted by ID ascending)
     try {
       if (typeof Accountmanager !== 'undefined' && Accountmanager.farm &&
           Accountmanager.farm.templates) {
-        var farmData = Accountmanager.farm;
-        if (farmData.templates.a && farmData.templates.a.id !== undefined) {
-          realTemplateA = farmData.templates.a.id;
+        var tmplKeys = Object.keys(Accountmanager.farm.templates)
+          .filter(function(k) { return k.indexOf('t_') === 0; })
+          .sort();
+        if (tmplKeys.length >= 1) {
+          realTemplateA = parseInt(tmplKeys[0].replace('t_', ''), 10);
         }
-        if (farmData.templates.b && farmData.templates.b.id !== undefined) {
-          realTemplateB = farmData.templates.b.id;
+        if (tmplKeys.length >= 2) {
+          realTemplateB = parseInt(tmplKeys[1].replace('t_', ''), 10);
         }
       }
     } catch (e) {
@@ -1643,25 +1647,15 @@
       return; // Not logged in or not in game
     }
 
-    // Always open on the Farm Assistant page so Accountmanager globals are available
-    // (templates, send_units_link, etc.) — redirect if not already there
+    // Best when opened on am_farm page (Accountmanager globals available)
+    // but works from any page via AJAX fallback
     var currentScreen = (typeof game_data !== 'undefined' && game_data.screen) || '';
     if (currentScreen !== 'am_farm') {
-      var villageId = TWTools.getVillageId();
-      window.location.href = '/game.php?village=' + villageId + '&screen=am_farm';
-      // Store flag so we auto-init after redirect
-      TWTools.Storage.set('twf_autostart', true);
-      return;
+      TWTools.UI.toast('Tip: Open on Farm Assistant page for best results', 'info');
     }
 
     init();
     TWTools.UI.toast('TW Farm v' + VERSION + ' loaded', 'success');
   });
-
-  // Auto-start after redirect to am_farm
-  if (TWTools.Storage.get('twf_autostart')) {
-    TWTools.Storage.remove('twf_autostart');
-    // Already on am_farm page — init will be called by the $(function) above
-  }
 
 })(window, jQuery);
