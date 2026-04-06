@@ -45,9 +45,13 @@
   /** LC carry capacity per unit */
   var LC_CARRY = 80;
 
-  /** Template IDs as used by the Farm Assistant */
+  /** Default template IDs — overridden by real IDs from Accountmanager.farm.templates */
   var TEMPLATE_A = 0;
   var TEMPLATE_B = 1;
+
+  /** Real template IDs read from game (set during farm target parsing) */
+  var realTemplateA = null;
+  var realTemplateB = null;
 
   /** Loot status colors from Farm Assistant reports */
   var LOOT_STATUS = {
@@ -662,16 +666,34 @@
       if (hMatch && !csrf) csrf = hMatch[1];
     });
 
-    // Extract send_units_link from script block
-    var htmlStr = typeof html === 'string' ? html : '';
-    var sendLinkMatch = htmlStr.match(/Accountmanager\.farm\s*\(\s*\{[^}]*url\s*:\s*['"]([^'"]+)['"]/);
-    if (sendLinkMatch) {
-      sendLink = sendLinkMatch[1];
+    // Extract real template IDs from Accountmanager.farm (the A/B buttons use these IDs)
+    if (typeof Accountmanager !== 'undefined' && Accountmanager.farm) {
+      var farmData = Accountmanager.farm;
+      if (farmData.templates) {
+        if (farmData.templates.a && farmData.templates.a.id !== undefined) {
+          realTemplateA = farmData.templates.a.id;
+        }
+        if (farmData.templates.b && farmData.templates.b.id !== undefined) {
+          realTemplateB = farmData.templates.b.id;
+        }
+      }
     }
-    // Alternative pattern
+
+    // Try to get send_units_link from TW's global Accountmanager object (most reliable)
+    if (typeof Accountmanager !== 'undefined' && Accountmanager.send_units_link) {
+      sendLink = Accountmanager.send_units_link;
+    }
+
+    // Fallback: extract from the page's inline script blocks
     if (!sendLink) {
-      sendLinkMatch = htmlStr.match(/send_units_link\s*[=:]\s*['"]([^'"]+)['"]/);
+      var htmlStr = typeof html === 'string' ? html : '';
+      var sendLinkMatch = htmlStr.match(/send_units_link\s*[=:]\s*['"]([^'"]+)['"]/);
       if (sendLinkMatch) sendLink = sendLinkMatch[1];
+    }
+    if (!sendLink) {
+      var htmlStr2 = typeof html === 'string' ? html : '';
+      var sendLinkMatch2 = htmlStr2.match(/Accountmanager\.farm\s*\(\s*\{[^}]*url\s*:\s*['"]([^'"]+)['"]/);
+      if (sendLinkMatch2) sendLink = sendLinkMatch2[1];
     }
 
     // Parse the #plunder_list table
@@ -1008,11 +1030,11 @@
         }
         if (selfCollision) continue;
 
-        // Select template
-        var templateId = TEMPLATE_A;
+        // Select template — use real IDs from Accountmanager if available
+        var templateId = realTemplateA !== null ? realTemplateA : TEMPLATE_A;
         var templateLabel = 'A';
         if (settings.useBForMaxLoot && target.maxLoot) {
-          templateId = TEMPLATE_B;
+          templateId = realTemplateB !== null ? realTemplateB : TEMPLATE_B;
           templateLabel = 'B';
         }
 
@@ -1096,38 +1118,56 @@
       var entry = farmPlan[idx];
       idx++;
 
-      // Build the farm request URL
-      // Farm Assistant POST: game.php?village={sourceId}&screen=am_farm&ajaxaction=farm&h={csrf}
-      var url = '/game.php?village=' + entry.sourceId +
-        '&screen=am_farm&ajaxaction=farm&h=' + encodeURIComponent(csrfToken);
+      // Use TW's native TribalWars.post() with Accountmanager.send_units_link
+      // This is the same method the Farm Assistant A/B buttons use.
+      // The send_units_link is a game variable like "/game.php?village=XXX&screen=am_farm&ajaxaction=farm"
+      // We replace the village= param with the source village ID.
+      var url = '';
+      if (sendUnitsLink) {
+        url = sendUnitsLink.replace(/village=\d+/, 'village=' + entry.sourceId);
+      } else {
+        // Fallback: construct URL manually
+        url = '/game.php?village=' + entry.sourceId +
+          '&screen=am_farm&ajaxaction=farm';
+      }
 
       var postData = {
         target: entry.targetId,
         template_id: entry.templateId,
-        source_village: entry.sourceId
+        source: entry.sourceId
       };
 
-      $.ajax({
-        url: url,
-        type: 'POST',
-        data: postData,
-        dataType: 'json',
-        timeout: 10000,
-        success: function(response) {
-          if (response && (response.success || response.result === 'success' || !response.error)) {
-            sent++;
-          } else {
-            failed++;
-          }
+      // Use TribalWars.post if available (handles CSRF + response parsing)
+      if (typeof TribalWars !== 'undefined' && typeof TribalWars.post === 'function') {
+        TribalWars.post(url, null, postData, function() {
+          sent++;
           if (progressCb) progressCb(idx, total);
           setTimeout(sendNext, REQUEST_DELAY);
-        },
-        error: function() {
+        }, function() {
           failed++;
           if (progressCb) progressCb(idx, total);
           setTimeout(sendNext, REQUEST_DELAY);
-        }
-      });
+        });
+      } else {
+        // Fallback: plain AJAX with CSRF in URL
+        $.ajax({
+          url: url + '&h=' + encodeURIComponent(csrfToken),
+          type: 'POST',
+          data: postData,
+          dataType: 'json',
+          timeout: 10000,
+          success: function() {
+            sent++;
+            if (progressCb) progressCb(idx, total);
+            setTimeout(sendNext, REQUEST_DELAY);
+          },
+          error: function() {
+            failed++;
+            if (progressCb) progressCb(idx, total);
+            setTimeout(sendNext, REQUEST_DELAY);
+          }
+        });
+      }
     }
 
     sendNext();
