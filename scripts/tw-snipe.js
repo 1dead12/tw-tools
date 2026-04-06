@@ -77,8 +77,8 @@
     unknown: { bg: '#f5f5f5', fg: '#616161', label: '???' }
   };
 
-  var TAB_IDS = ['timer', 'scanner', 'return-snipe', 'coordination', 'tools'];
-  var TAB_LABELS = ['Timer', 'Scanner', 'Return-Snipe', 'Coordination', 'Tools'];
+  var TAB_IDS = ['timer', 'scanner', 'return-snipe', 'coordination', 'noble', 'tools'];
+  var TAB_LABELS = ['Timer', 'Scanner', 'Return-Snipe', 'Coordination', 'Noble Train', 'Tools'];
 
   // ============================================================
   // INTERNAL UTILITIES (thin wrappers / format helpers)
@@ -684,6 +684,14 @@
     // Coordination tab
     coordMode: 'A',
     coordTarget: '',
+    // Noble tab
+    nobleTarget: '',
+    nobleSourceId: null,
+    nobleArrival: '',
+    nobleCount: 4,
+    nobleGap: 200,
+    nobleIncludeNuke: true,
+    noblePlan: null,
     // Tools tab
     toolCalcFrom: '',
     toolCalcTo: '',
@@ -722,7 +730,13 @@
         scanUnits: this.scanUnits,
         coordMode: this.coordMode,
         returnManualUnit: this.returnManualUnit,
-        returnMyVillageId: this.returnMyVillageId
+        returnMyVillageId: this.returnMyVillageId,
+        nobleTarget: this.nobleTarget,
+        nobleSourceId: this.nobleSourceId,
+        nobleArrival: this.nobleArrival,
+        nobleCount: this.nobleCount,
+        nobleGap: this.nobleGap,
+        nobleIncludeNuke: this.nobleIncludeNuke
       });
     },
 
@@ -743,6 +757,12 @@
         this.coordMode = saved.coordMode || 'A';
         this.returnManualUnit = saved.returnManualUnit || 'light';
         this.returnMyVillageId = saved.returnMyVillageId || null;
+        this.nobleTarget = saved.nobleTarget || '';
+        this.nobleSourceId = saved.nobleSourceId || null;
+        this.nobleArrival = saved.nobleArrival || '';
+        this.nobleCount = saved.nobleCount !== undefined ? saved.nobleCount : 4;
+        this.nobleGap = saved.nobleGap !== undefined ? saved.nobleGap : 200;
+        this.nobleIncludeNuke = saved.nobleIncludeNuke !== undefined ? saved.nobleIncludeNuke : true;
       }
     },
 
@@ -1338,6 +1358,7 @@
         case 'scanner': this.renderScannerTab(); break;
         case 'return-snipe': this.renderReturnSnipeTab(); break;
         case 'coordination': this.renderCoordinationTab(); break;
+        case 'noble': this.renderNobleTab(); break;
         case 'tools': this.renderToolsTab(); break;
       }
     },
@@ -2561,7 +2582,345 @@
     },
 
     // ============================================================
-    // TAB 5: TOOLS
+    // TAB 5: NOBLE TRAIN
+    // ============================================================
+    renderNobleTab: function() {
+      var html = '';
+      html += this._renderNobleInputs();
+      if (State.noblePlan) {
+        html += this._renderNoblePlanTable();
+      }
+      $el('tab-noble').html(html);
+      this._bindNobleEvents();
+      this._startNobleCountdown();
+    },
+
+    _renderNobleInputs: function() {
+      var targetCoords = parseCoords(State.nobleTarget);
+      var html = '<div class="tws-section">';
+      html += '<div class="tws-section-title">Noble Train Planner</div>';
+      html += '<div class="tws-info">Plan a coordinated noble train with clearing nuke and timed noble arrivals.</div>';
+
+      // Row 1: Target + Source
+      html += '<div class="tws-grid-2" style="margin-bottom:6px">';
+      html += '<div><span class="tws-label">Target Village</span>';
+      html += '<input class="tws-input tws-input-coords" id="' + ID_PREFIX + 'noble-target" placeholder="408|510" value="' + State.nobleTarget + '"></div>';
+      html += '<div><span class="tws-label">Source Village</span>';
+      html += '<select class="tws-select" id="' + ID_PREFIX + 'noble-source" style="width:100%">' +
+        buildVillageOptions(State.playerVillages, State.nobleSourceId, targetCoords) + '</select></div>';
+      html += '</div>';
+
+      // Row 2: Arrival + Noble count
+      html += '<div class="tws-grid-2" style="margin-bottom:6px">';
+      html += '<div><span class="tws-label">Desired Arrival (HH:MM:SS.mmm)</span>';
+      html += '<input class="tws-input tws-input-time" id="' + ID_PREFIX + 'noble-arrival" placeholder="10:30:00:000" value="' + State.nobleArrival + '"></div>';
+      html += '<div><span class="tws-label">Number of Nobles (1-4)</span>';
+      html += '<select class="tws-select" id="' + ID_PREFIX + 'noble-count">';
+      for (var i = 1; i <= 4; i++) {
+        var sel = i === State.nobleCount ? ' selected' : '';
+        html += '<option value="' + i + '"' + sel + '>' + i + '</option>';
+      }
+      html += '</select></div>';
+      html += '</div>';
+
+      // Row 3: Gap + Include nuke
+      html += '<div class="tws-grid-2" style="margin-bottom:6px">';
+      html += '<div><span class="tws-label">Gap Between Nobles (ms)</span>';
+      html += '<input class="tws-input" id="' + ID_PREFIX + 'noble-gap" type="number" min="50" max="2000" step="50" value="' + State.nobleGap + '"></div>';
+      html += '<div style="display:flex;align-items:flex-end;padding-bottom:4px">';
+      html += '<label style="cursor:pointer;font-size:12px;color:' + COLORS.text + '">';
+      html += '<input type="checkbox" id="' + ID_PREFIX + 'noble-nuke"' + (State.nobleIncludeNuke ? ' checked' : '') + ' style="margin-right:4px">';
+      html += 'Include clearing nuke (ram speed)</label></div>';
+      html += '</div>';
+
+      // World speed info
+      var ws = Data.getWorldSpeed();
+      var usf = Data.getUnitSpeedFactor();
+      html += '<div style="font-size:10px;color:' + COLORS.textDim + ';margin-bottom:8px">World speed: ' + ws + 'x | Unit speed factor: ' + usf + 'x</div>';
+
+      // Calculate button
+      html += '<button class="tws-btn" id="' + ID_PREFIX + 'noble-calc" style="width:100%">Calculate Noble Train</button>';
+      html += '</div>';
+      return html;
+    },
+
+    _calcNoblePlan: function() {
+      var target = parseCoords(State.nobleTarget);
+      var source = findVillageById(State.playerVillages, State.nobleSourceId);
+      var arrivalMs = parseTimeToMs(State.nobleArrival);
+      var count = State.nobleCount;
+      var gap = State.nobleGap;
+      var includeNuke = State.nobleIncludeNuke;
+
+      if (!target) return { error: 'Invalid target coordinates.' };
+      if (!source) return { error: 'Select a source village.' };
+      if (isNaN(arrivalMs)) return { error: 'Invalid arrival time. Use HH:MM:SS or HH:MM:SS:mmm format.' };
+
+      var dist = Data.distance(source, target);
+      var nobleTravel = Data.travelTime(source, target, 'snob');
+      var nukeTravel = Data.travelTime(source, target, 'ram');
+      var sourceName = (source.name || 'Village') + '(' + source.x + '|' + source.y + ')';
+      var targetName = '(' + target.x + '|' + target.y + ')';
+
+      var entries = [];
+      var seq = 1;
+
+      // Noble arrivals: first noble at arrivalMs + gap (to leave room for nuke before it)
+      // Nuke arrives at arrivalMs (gap ms before first noble)
+      // Noble 1 arrives at arrivalMs + gap
+      // Noble 2 arrives at arrivalMs + 2*gap, etc.
+      // But per spec: Noble arrivals = arrival+0ms, +gap, +2*gap, +3*gap
+      // Clearing nuke arrival = noble_arrival_1 - gap
+
+      for (var i = 0; i < count; i++) {
+        var nobleArrival = arrivalMs + (i * gap);
+        var nobleSend = nobleArrival - nobleTravel;
+        if (nobleSend < 0) nobleSend += 86400000;
+        entries.push({
+          type: 'Noble ' + (i + 1),
+          typeClass: 'noble',
+          source: sourceName,
+          target: targetName,
+          dist: dist,
+          sendTime: nobleSend,
+          arrivalTime: nobleArrival,
+          travelTime: nobleTravel
+        });
+      }
+
+      if (includeNuke) {
+        var nukeArrival = arrivalMs - gap;
+        if (nukeArrival < 0) nukeArrival += 86400000;
+        var nukeSend = nukeArrival - nukeTravel;
+        if (nukeSend < 0) nukeSend += 86400000;
+        entries.push({
+          type: 'NUKE',
+          typeClass: 'cleaner',
+          source: sourceName,
+          target: targetName,
+          dist: dist,
+          sendTime: nukeSend,
+          arrivalTime: nukeArrival,
+          travelTime: nukeTravel
+        });
+      }
+
+      // Sort by send time
+      entries.sort(function(a, b) { return a.sendTime - b.sendTime; });
+
+      // Assign sequence numbers
+      for (var j = 0; j < entries.length; j++) {
+        entries[j].seq = j + 1;
+      }
+
+      return { entries: entries, dist: dist, source: sourceName, target: targetName };
+    },
+
+    _renderNoblePlanTable: function() {
+      var plan = State.noblePlan;
+      if (plan.error) {
+        return '<div class="tws-section"><div class="tws-warn">' + plan.error + '</div></div>';
+      }
+
+      var entries = plan.entries;
+      var now = TimeSync.now();
+      var html = '<div class="tws-section">';
+      html += '<div class="tws-flex-between"><div class="tws-section-title">Send Schedule</div>';
+      html += '<button class="tws-btn tws-btn-sm" id="' + ID_PREFIX + 'noble-copy-bb">Copy BBCode</button></div>';
+
+      html += '<table class="tws-table" style="margin-top:6px"><thead><tr>';
+      html += '<th>#</th><th>Type</th><th>Source</th><th>Target</th><th>Dist</th>';
+      html += '<th>Send Time</th><th>Arrival</th><th>Travel</th><th>Countdown</th><th>Verify</th>';
+      html += '</tr></thead><tbody>';
+
+      // Find the next action (first entry with sendTime in the future)
+      var nextIdx = -1;
+      for (var i = 0; i < entries.length; i++) {
+        var remaining = entries[i].sendTime - now;
+        if (remaining < -43200000) remaining += 86400000;
+        if (remaining > 0 && nextIdx === -1) nextIdx = i;
+      }
+
+      for (var j = 0; j < entries.length; j++) {
+        var e = entries[j];
+        var isNext = j === nextIdx;
+        var badge = BADGE_COLORS[e.typeClass] || BADGE_COLORS.unknown;
+        var rowStyle = isNext ? 'background:' + COLORS.windowSafe + ';font-weight:bold' : '';
+        var verified = Math.abs((e.sendTime + e.travelTime) - e.arrivalTime) < 2;
+        // Handle day wrap for verification
+        if (!verified) {
+          verified = Math.abs(((e.sendTime + e.travelTime) % 86400000) - (e.arrivalTime % 86400000)) < 2;
+        }
+
+        html += '<tr style="' + rowStyle + '">';
+        html += '<td>' + e.seq + '</td>';
+        html += '<td><span style="background:' + badge.bg + ';color:' + badge.fg + ';padding:1px 5px;border-radius:2px;font-size:10px;font-weight:bold">' + e.type + '</span></td>';
+        html += '<td style="font-size:11px">' + e.source + '</td>';
+        html += '<td style="font-size:11px">' + e.target + '</td>';
+        html += '<td class="tws-mono">' + e.dist.toFixed(2) + '</td>';
+        html += '<td class="tws-mono" style="font-weight:bold">' + formatTime(e.sendTime) + '</td>';
+        html += '<td class="tws-mono">' + formatTime(e.arrivalTime) + '</td>';
+        html += '<td class="tws-mono">' + formatTimeSec(e.travelTime) + '</td>';
+        html += '<td class="tws-mono tws-countdown-live tws-noble-cd" data-target="' + e.sendTime + '" data-seq="' + e.seq + '">' + formatDuration(e.sendTime - now) + '</td>';
+        html += '<td style="text-align:center;color:' + (verified ? COLORS.success : COLORS.danger) + '">' + (verified ? '&#10003;' : '&#10007;') + '</td>';
+        html += '</tr>';
+      }
+
+      html += '</tbody></table></div>';
+      return html;
+    },
+
+    _startNobleCountdown: function() {
+      if (this._nobleInterval) clearInterval(this._nobleInterval);
+      if (!State.noblePlan || State.noblePlan.error) return;
+
+      var self = this;
+      var beeped = {};
+      this._nobleInterval = setInterval(function() {
+        if (State.activeTab !== 'noble') {
+          clearInterval(self._nobleInterval);
+          self._nobleInterval = null;
+          return;
+        }
+
+        var now = TimeSync.now();
+        var entries = State.noblePlan.entries;
+        var nextIdx = -1;
+
+        for (var i = 0; i < entries.length; i++) {
+          var remaining = entries[i].sendTime - now;
+          if (remaining < -43200000) remaining += 86400000;
+          if (remaining > 0 && nextIdx === -1) nextIdx = i;
+        }
+
+        $('.tws-noble-cd').each(function() {
+          var target = parseFloat($(this).data('target'));
+          var seq = parseInt($(this).data('seq'), 10);
+          var remaining = target - now;
+          if (remaining < -43200000) remaining += 86400000;
+          $(this).text(formatDuration(remaining));
+
+          // Color coding
+          if (remaining < 0) $(this).css('color', COLORS.textDim);
+          else if (remaining < 5000) $(this).css({ color: COLORS.danger, fontWeight: 'bold' });
+          else if (remaining < 30000) $(this).css('color', COLORS.warning);
+          else $(this).css('color', COLORS.success);
+
+          // Flash the row when within 3 seconds
+          var row = $(this).closest('tr');
+          if (remaining > 0 && remaining < 3000) {
+            var flash = Math.floor(Date.now() / 300) % 2 === 0;
+            row.css('background', flash ? COLORS.windowDanger : COLORS.windowSafe);
+          } else if (remaining <= 0 && remaining > -2000) {
+            row.css('background', COLORS.windowDanger);
+          }
+
+          // Beep when countdown reaches 0
+          if (remaining <= 0 && remaining > -1000 && !beeped[seq]) {
+            beeped[seq] = true;
+            self._nobleBeep();
+          }
+        });
+
+        // Highlight next action row
+        $el('tab-noble').find('tbody tr').each(function(idx) {
+          if (idx === nextIdx) {
+            var existing = $(this).css('background');
+            if (!existing || existing.indexOf('rgba') === -1) {
+              $(this).css('background', COLORS.windowSafe);
+            }
+          }
+        });
+      }, 50);
+    },
+
+    _nobleBeep: function() {
+      try {
+        var ctx = new (window.AudioContext || window.webkitAudioContext)();
+        var osc = ctx.createOscillator();
+        var gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.type = 'square';
+        osc.frequency.value = 880;
+        gain.gain.value = 0.15;
+        osc.start();
+        osc.stop(ctx.currentTime + 0.12);
+      } catch (e) { /* silent fail if no audio */ }
+    },
+
+    _buildNobleBBCode: function() {
+      var plan = State.noblePlan;
+      if (!plan || plan.error) return '';
+      var entries = plan.entries;
+      var bb = '[b]Noble Train Plan[/b]\n';
+      bb += 'Target: [coord]' + State.nobleTarget + '[/coord]\n';
+      bb += 'Source: ' + plan.source + '\n';
+      bb += 'Distance: ' + plan.dist.toFixed(2) + ' fields\n\n';
+      bb += '[table]\n';
+      bb += '[**]#[||]Type[||]Send Time[||]Arrival[||]Travel[/**]\n';
+      for (var i = 0; i < entries.length; i++) {
+        var e = entries[i];
+        bb += '[*]' + e.seq + '[|]' + e.type + '[|]' + formatTime(e.sendTime) + '[|]' + formatTime(e.arrivalTime) + '[|]' + formatTimeSec(e.travelTime) + '\n';
+      }
+      bb += '[/table]';
+      return bb;
+    },
+
+    _bindNobleEvents: function() {
+      var self = this;
+
+      $el('noble-calc').on('click', function() {
+        // Save inputs
+        State.nobleTarget = $el('noble-target').val();
+        State.nobleSourceId = $el('noble-source').val() || null;
+        State.nobleArrival = $el('noble-arrival').val();
+        State.nobleCount = parseInt($el('noble-count').val(), 10) || 4;
+        State.nobleGap = parseInt($el('noble-gap').val(), 10) || 200;
+        State.nobleIncludeNuke = $el('noble-nuke').is(':checked');
+        State.save();
+
+        // Calculate
+        State.noblePlan = self._calcNoblePlan();
+        self.renderNobleTab();
+      });
+
+      // Re-sort source dropdown when target changes
+      $el('noble-target').on('change', function() {
+        State.nobleTarget = $(this).val();
+        State.save();
+        self.renderNobleTab();
+      });
+
+      $el('noble-source').on('change', function() {
+        State.nobleSourceId = $(this).val() || null;
+        State.save();
+      });
+
+      // Copy BBCode
+      $el('tab-noble').on('click', '#' + ID_PREFIX + 'noble-copy-bb', function() {
+        var bb = self._buildNobleBBCode();
+        if (navigator.clipboard) {
+          navigator.clipboard.writeText(bb).then(function() {
+            $(this).text('Copied!');
+            setTimeout(function() { self.renderNobleTab(); }, 1500);
+          }.bind(this));
+        } else {
+          // Fallback: textarea trick
+          var ta = document.createElement('textarea');
+          ta.value = bb;
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+          $(this).text('Copied!');
+          setTimeout(function() { self.renderNobleTab(); }, 1500);
+        }
+      });
+    },
+
+    // ============================================================
+    // TAB 6: TOOLS
     // ============================================================
     renderToolsTab: function() {
       var html = '';
