@@ -1,310 +1,58 @@
 /**
- * TW Farm v1.0.0
- * Light Cavalry farming assistant with collision avoidance and template selection.
+ * TW Farm v3.0.0 — Native Farm Assistant integration.
+ * Plan table injected before #am_widget_Farm, one-click-per-farm using
+ * TribalWars.post() and Accountmanager API. Settings via Dialog.show().
  *
- * Features:
- * - Farm tab: scan sources, plan optimal LC farm runs, execute via Farm Assistant API
- * - Settings tab: group filter, max distance, cooldown, min LC, template preferences
- * - Collision avoidance: skips targets with existing attacks within cooldown window
- * - Queue system with 200ms delay between requests to avoid rate limiting
- * - NEVER auto-sends without explicit user action
- *
- * @version 1.0.0
- * @requires jQuery, TribalWars game environment, window.TWTools (tw-core.js, tw-ui.js)
+ * @version 3.0.0
+ * @requires jQuery, TribalWars game env, window.TWTools (tw-core.js, tw-ui.js)
  */
 ;(function(window, $) {
   'use strict';
 
-  // ============================================================
-  // GUARD: TWTools must be loaded
-  // ============================================================
-
   if (!window.TWTools || !window.TWTools.UI) {
-    throw new Error('tw-farm.js requires tw-core.js and tw-ui.js (window.TWTools.UI missing)');
+    throw new Error('tw-farm.js requires tw-core.js and tw-ui.js');
   }
 
   var TWTools = window.TWTools;
-
-  // ============================================================
-  // CONFIG & CONSTANTS
-  // ============================================================
-
-  var VERSION = '1.0.0';
-  var ID_PREFIX = 'twf-';
+  var VERSION = '3.0.0';
   var STORAGE_PREFIX = 'twf_';
-
-  /** Cache TTL for scan data (5 minutes) */
-  var CACHE_TTL = 5 * 60 * 1000;
-
-  /** Minimum delay between AJAX requests to avoid rate limiting */
-  /**
-   * Base delay between farm requests (ms).
-   * Randomized ±50% to mimic human behavior and avoid bot detection.
-   * TW's own Farm Assistant has ~200ms debounce, but humans click ~2-5s apart.
-   * We use 300-600ms base (faster than human but within the game's own scripting threshold).
-   * @type {number}
-   */
-  var REQUEST_DELAY_BASE = 400;
-
-  /** Get randomized delay to avoid bot-pattern detection */
-  function getRequestDelay() {
-    // Random delay between 250ms and 600ms
-    return REQUEST_DELAY_BASE + Math.floor(Math.random() * 300) - 100;
-  }
-
-  /** LC speed in minutes per field (base, before world/unit speed modifiers) */
   var LC_SPEED = 10;
-
-  /** LC carry capacity per unit */
   var LC_CARRY = 80;
-
-  /** Default template IDs — overridden by real IDs from Accountmanager.farm.templates */
-  var TEMPLATE_A = 0;
-  var TEMPLATE_B = 1;
-
-  /** Real template IDs read from game (set during farm target parsing) */
-  var realTemplateA = null;
-  var realTemplateB = null;
-
-  /** Loot status colors from Farm Assistant reports */
-  var LOOT_STATUS = {
-    GREEN: 'green',    // Full haul
-    YELLOW: 'yellow',  // Partial haul
-    RED: 'red',        // Losses or empty
-    UNKNOWN: 'unknown' // No report
-  };
-
-  /** Default settings */
   var DEFAULT_SETTINGS = {
-    groupId: '0',
-    maxDistance: 20,
-    cooldownMinutes: 5,
-    minLC: 5,
-    useBForMaxLoot: true,
-    includeNewBarbs: false
+    groupId: '0', maxDistance: 20, cooldownMinutes: 5, minLC: 5, useBForMaxLoot: true
   };
+  var LOOT = { GREEN: 'green', YELLOW: 'yellow', RED: 'red', UNKNOWN: 'unknown' };
 
-  // ============================================================
-  // STORAGE (wraps TWTools.Storage with local prefix)
-  // ============================================================
-
+  // ---- Storage wrapper ----
   var Store = {
-    /**
-     * Get a setting value from localStorage.
-     * @param {string} key - Setting key.
-     * @param {*} fallback - Default value.
-     * @returns {*} Stored or default value.
-     */
-    get: function(key, fallback) {
-      var val = TWTools.Storage.get(STORAGE_PREFIX + key);
-      return val !== null ? val : fallback;
-    },
-
-    /**
-     * Set a setting value in localStorage (permanent).
-     * @param {string} key - Setting key.
-     * @param {*} value - Value to store.
-     */
-    set: function(key, value) {
-      TWTools.Storage.set(STORAGE_PREFIX + key, value);
-    },
-
-    /**
-     * Set a cached value with TTL.
-     * @param {string} key - Cache key.
-     * @param {*} value - Value to store.
-     * @param {number} ttlMs - Time-to-live in ms.
-     */
-    setCache: function(key, value, ttlMs) {
-      TWTools.Storage.set(STORAGE_PREFIX + key, value, ttlMs);
-    },
-
-    /**
-     * Get a cached value (null if expired).
-     * @param {string} key - Cache key.
-     * @returns {*} Stored value or null.
-     */
-    getCache: function(key) {
-      return TWTools.Storage.get(STORAGE_PREFIX + key);
-    }
+    get: function(k, fb) { var v = TWTools.Storage.get(STORAGE_PREFIX + k); return v !== null ? v : fb; },
+    set: function(k, v) { TWTools.Storage.set(STORAGE_PREFIX + k, v); }
   };
 
-  // ============================================================
-  // SETTINGS
-  // ============================================================
-
-  /** @type {Object} Current settings */
+  // ---- Settings ----
   var settings = {};
+  function loadSettings() { settings = $.extend(true, {}, DEFAULT_SETTINGS, Store.get('settings', null) || {}); }
+  function saveSettings() { Store.set('settings', settings); }
 
-  /**
-   * Load settings from localStorage, merging with defaults.
-   */
-  function loadSettings() {
-    var saved = Store.get('settings', null);
-    settings = $.extend(true, {}, DEFAULT_SETTINGS, saved || {});
-  }
-
-  /**
-   * Save current settings to localStorage.
-   */
-  function saveSettings() {
-    Store.set('settings', settings);
-  }
-
-  // ============================================================
-  // DATA STRUCTURES
-  // ============================================================
-
-  /**
-   * @typedef {Object} SourceVillage
-   * @property {number} id - Village ID.
-   * @property {string} name - Village name.
-   * @property {string} coords - Village coordinates "x|y".
-   * @property {{x: number, y: number}} coordsParsed - Parsed coordinates.
-   * @property {number} lcAvailable - Available LC count.
-   * @property {number} lcTotal - Total LC in village (home).
-   * @property {number} targetsInRange - Number of farm targets within max distance.
-   * @property {string} status - Current status text.
-   */
-
-  /**
-   * @typedef {Object} FarmTarget
-   * @property {number} id - Village ID.
-   * @property {string} coords - Coordinates "x|y".
-   * @property {{x: number, y: number}} coordsParsed - Parsed coordinates.
-   * @property {string} playerName - Owner name (empty for barbs).
-   * @property {string} lootStatus - Report status (green/yellow/red/unknown).
-   * @property {boolean} maxLoot - Whether the target returned max loot last time.
-   * @property {number} wallLevel - Estimated wall level.
-   * @property {number} distance - Distance from source (populated during planning).
-   */
-
-  /**
-   * @typedef {Object} OutgoingAttack
-   * @property {string} targetCoords - Target coordinates.
-   * @property {number} arrivalMs - Arrival time in ms since midnight.
-   * @property {number} sourceId - Source village ID.
-   */
-
-  /**
-   * @typedef {Object} FarmPlanEntry
-   * @property {number} sourceId - Source village ID.
-   * @property {string} sourceName - Source village name.
-   * @property {string} sourceCoords - Source coordinates.
-   * @property {number} targetId - Target village ID.
-   * @property {string} targetCoords - Target coordinates.
-   * @property {number} distance - Distance in fields.
-   * @property {number} templateId - Template to use (0=A, 1=B).
-   * @property {string} templateLabel - Template label (A/B).
-   * @property {number} travelTimeMs - Estimated travel time in ms.
-   * @property {string} estArrival - Estimated arrival time string.
-   */
-
-  /** @type {SourceVillage[]} Scanned source villages */
-  var sourceVillages = [];
-
-  /** @type {FarmTarget[]} Farm targets from Farm Assistant */
-  var farmTargets = [];
-
-  /** @type {OutgoingAttack[]} Outgoing attacks for collision avoidance */
-  var outgoingAttacks = [];
-
-  /** @type {FarmPlanEntry[]} Current farm plan */
-  var farmPlan = [];
-
-  /** @type {Array.<{id: string, name: string}>} Available village groups */
+  // ---- State ----
+  var sourceVillages = [], farmTargets = [], outgoingAttacks = [], farmPlan = [];
   var availableGroups = [{ id: '0', name: 'All villages' }];
+  var isScanning = false, isFarming = false;
+  var csrfToken = '', sendUnitsLink = '';
+  var realTemplateA = null, realTemplateB = null;
+  var farmSentCount = 0, farmErrorCount = 0, enterKeyBound = false;
 
-  /** @type {boolean} Whether a scan/fetch is in progress */
-  var isScanning = false;
-
-  /** @type {boolean} Whether farming is in progress */
-  var isFarming = false;
-
-  /** @type {boolean} Whether farming should be cancelled */
-  var farmCancelled = false;
-
-  /** @type {string} CSRF token for Farm Assistant */
-  var csrfToken = '';
-
-  /** @type {string} Send units link template from Farm Assistant page */
-  var sendUnitsLink = '';
-
-  /** @type {Object} Card controller reference */
-  var card = null;
-
-  // ============================================================
-  // FORMAT HELPERS
-  // ============================================================
-
-  /**
-   * Format a number with dot-separated thousands.
-   * @param {number} n - Number to format.
-   * @returns {string} Formatted string.
-   */
-  function formatNum(n) {
-    if (typeof n !== 'number' || isNaN(n)) return '0';
-    return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  // ---- Format helpers ----
+  function formatNum(n) { return (typeof n !== 'number' || isNaN(n)) ? '0' : n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, '.'); }
+  function pInt(text) { return parseInt((text || '').replace(/\./g, '').replace(/[^\d-]/g, ''), 10) || 0; }
+  function esc(s) { return !s ? '' : s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  function fmtDist(d) { return d.toFixed(1); }
+  function fmtTravel(ms) {
+    var t = Math.floor(ms / 1000), h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+    return h > 0 ? h + 'h ' + m + 'm' : m > 0 ? m + 'm ' + s + 's' : s + 's';
   }
-
-  /**
-   * Parse an integer from text, stripping non-numeric characters.
-   * @param {string} text - Text containing a number.
-   * @returns {number} Parsed integer or 0.
-   */
-  function parseIntSafe(text) {
-    if (!text) return 0;
-    var cleaned = text.replace(/\./g, '').replace(/[^\d-]/g, '');
-    return parseInt(cleaned, 10) || 0;
-  }
-
-  /**
-   * Escape HTML special characters.
-   * @param {string} str - Raw string.
-   * @returns {string} Escaped string.
-   */
-  function escapeHtml(str) {
-    if (!str) return '';
-    return str.replace(/&/g, '&amp;')
-              .replace(/</g, '&lt;')
-              .replace(/>/g, '&gt;')
-              .replace(/"/g, '&quot;');
-  }
-
-  /**
-   * Format distance to 1 decimal place.
-   * @param {number} d - Distance.
-   * @returns {string} Formatted distance.
-   */
-  function formatDist(d) {
-    return d.toFixed(1);
-  }
-
-  /**
-   * Format milliseconds as travel time string "Xh Ym" or "Ym Zs".
-   * @param {number} ms - Duration in milliseconds.
-   * @returns {string} Formatted duration.
-   */
-  function formatTravelTime(ms) {
-    var totalSec = Math.floor(ms / 1000);
-    var h = Math.floor(totalSec / 3600);
-    var m = Math.floor((totalSec % 3600) / 60);
-    var s = totalSec % 60;
-    if (h > 0) return h + 'h ' + m + 'm';
-    if (m > 0) return m + 'm ' + s + 's';
-    return s + 's';
-  }
-
-  /**
-   * Format ms since midnight to "HH:MM:SS".
-   * @param {number} ms - Milliseconds since midnight.
-   * @returns {string} Formatted time.
-   */
-  function formatTimeShort(ms) {
-    var totalSec = Math.floor(ms / 1000);
-    var h = Math.floor(totalSec / 3600) % 24;
-    var m = Math.floor((totalSec % 3600) / 60);
-    var s = totalSec % 60;
+  function fmtTime(ms) {
+    var t = Math.floor(ms / 1000), h = Math.floor(t / 3600) % 24, m = Math.floor((t % 3600) / 60), s = t % 60;
     return TWTools.pad2(h) + ':' + TWTools.pad2(m) + ':' + TWTools.pad2(s);
   }
 
@@ -312,684 +60,319 @@
   // DATA FETCHING — SOURCE VILLAGES
   // ============================================================
 
-  /**
-   * Fetch source villages with LC counts from the combined overview.
-   * Parses village ID, name, coords, and LC troop count.
-   * @param {function(SourceVillage[])} callback - Called with source village data.
-   * @param {function(string)} statusCb - Status update callback.
-   */
   function fetchSourceVillages(callback, statusCb) {
-    var groupParam = (settings.groupId && settings.groupId !== '0')
-      ? '&group=' + settings.groupId : '';
-    var allVillages = [];
-    var page = 0;
-
+    var groupParam = (settings.groupId && settings.groupId !== '0') ? '&group=' + settings.groupId : '';
+    var all = [], page = 0;
     if (statusCb) statusCb('Fetching source villages...');
 
-    function fetchPage() {
-      var villageId = TWTools.getVillageId();
-      var url = '/game.php?village=' + villageId + '&screen=overview_villages&mode=units&type=own_home' +
-        groupParam + '&page=' + page;
-
-      $.ajax({
-        url: url,
-        dataType: 'html',
-        timeout: 15000,
+    (function fetchPage() {
+      var url = '/game.php?village=' + TWTools.getVillageId() +
+        '&screen=overview_villages&mode=units&type=own_home' + groupParam + '&page=' + page;
+      $.ajax({ url: url, dataType: 'html', timeout: 15000,
         success: function(html) {
-          var result = parseSourceVillages(html);
-          allVillages = allVillages.concat(result.villages);
-
-          if (statusCb) {
-            statusCb('Loaded page ' + (page + 1) + ' (' + allVillages.length + ' villages)...');
-          }
-
-          if (result.hasNextPage) {
-            page++;
-            setTimeout(fetchPage, 200);
-          } else {
-            // Return ALL villages (don't filter by minLC here — show all in UI,
-            // only skip villages with 0 LC during planning)
-            callback(allVillages);
-          }
+          var r = parseSourceVillages(html);
+          all = all.concat(r.villages);
+          if (statusCb) statusCb('Sources: page ' + (page + 1) + ' (' + all.length + ' villages)...');
+          if (r.hasNextPage) { page++; setTimeout(fetchPage, 200); }
+          else callback(all);
         },
-        error: function() {
-          if (statusCb) statusCb('Error fetching source villages.');
-          callback([]);
-        }
+        error: function() { if (statusCb) statusCb('Error fetching sources.'); callback(all); }
       });
-    }
-
-    fetchPage();
+    })();
   }
 
-  /**
-   * Parse source village data from the troop overview HTML.
-   * @param {string} html - Raw HTML of the overview page.
-   * @returns {{villages: SourceVillage[], hasNextPage: boolean}} Parsed data.
-   */
   function parseSourceVillages(html) {
-    var $page = $('<div/>').html(html);
-    var villages = [];
+    var $p = $('<div/>').html(html), villages = [];
+    var $t = $p.find('#units_table, table.vis.overview_table');
+    if (!$t.length) $t = $p.find('table.vis').filter(function() { return $(this).find('tr').length > 2; }).first();
+    if (!$t.length) return { villages: [], hasNextPage: false };
 
-    var $table = $page.find('#units_table, table.vis.overview_table');
-    if ($table.length === 0) {
-      $table = $page.find('table.vis').filter(function() {
-        return $(this).find('tr').length > 2;
-      }).first();
-    }
-
-    if ($table.length === 0) {
-      return { villages: [], hasNextPage: false };
-    }
-
-    // Parse header to find LC column index
-    var lcColIndex = -1;
-    var headerCells = $table.find('tr:first th, thead th');
-    headerCells.each(function(idx) {
-      var $th = $(this);
-      // LC column has the light cavalry icon or text
-      var $img = $th.find('img[src*="unit_light"]');
-      if ($img.length > 0) {
-        lcColIndex = idx;
-        return false;
-      }
-      var text = $.trim($th.text()).toLowerCase();
-      if (text === 'light' || text === 'lc' || text === 'lk') {
-        lcColIndex = idx;
-        return false;
-      }
+    var lcCol = -1;
+    $t.find('tr:first th, thead th').each(function(idx) {
+      if ($(this).find('img[src*="unit_light"]').length) { lcCol = idx; return false; }
+      var txt = $.trim($(this).text()).toLowerCase();
+      if (txt === 'light' || txt === 'lc' || txt === 'lk') { lcCol = idx; return false; }
     });
 
-    // Parse village rows
-    $table.find('tbody tr, tr').not(':first').each(function() {
-      var $row = $(this);
-      var $cells = $row.find('td');
-      if ($cells.length < 3) return;
-
-      // Find village link with coordinates
-      var $villageLink = $();
-      $row.find('a[href*="village="]').each(function() {
-        var text = $.trim($(this).text());
-        if (text.match(/\(\d{1,3}\|\d{1,3}\)/)) {
-          $villageLink = $(this);
-          return false;
-        }
+    $t.find('tbody tr, tr').not(':first').each(function() {
+      var $r = $(this), $c = $r.find('td');
+      if ($c.length < 3) return;
+      var $vl = $();
+      $r.find('a[href*="village="]').each(function() {
+        if ($.trim($(this).text()).match(/\(\d{1,3}\|\d{1,3}\)/)) { $vl = $(this); return false; }
       });
-
-      if ($villageLink.length === 0) return;
-
-      var villageHref = $villageLink.attr('href') || '';
-      var villageIdMatch = villageHref.match(/village=(\d+)/);
-      if (!villageIdMatch) return;
-
-      var villageId = parseInt(villageIdMatch[1], 10);
-      var linkText = $.trim($villageLink.text());
-      var coordsMatch = linkText.match(/\((\d{1,3}\|\d{1,3})\)/);
-      var coords = coordsMatch ? coordsMatch[1] : '';
-      var name = linkText.replace(/\s*\(\d{1,3}\|\d{1,3}\)\s*K?\d*\s*$/, '').trim();
-
-      // Parse LC count
-      var lcCount = 0;
-      if (lcColIndex >= 0 && lcColIndex < $cells.length) {
-        lcCount = parseIntSafe($cells.eq(lcColIndex).text());
-      }
-
+      if (!$vl.length) return;
+      var href = $vl.attr('href') || '', vm = href.match(/village=(\d+)/);
+      if (!vm) return;
+      var lt = $.trim($vl.text()), cm = lt.match(/\((\d{1,3}\|\d{1,3})\)/);
+      var coords = cm ? cm[1] : '', name = lt.replace(/\s*\(\d{1,3}\|\d{1,3}\)\s*K?\d*\s*$/, '').trim();
+      var lc = (lcCol >= 0 && lcCol < $c.length) ? pInt($c.eq(lcCol).text()) : 0;
       var parsed = TWTools.parseCoords(coords);
       if (!parsed) return;
-
-      villages.push({
-        id: villageId,
-        name: name || ('Village ' + coords),
-        coords: coords,
-        coordsParsed: parsed,
-        lcAvailable: lcCount,
-        lcTotal: lcCount,
-        targetsInRange: 0,
-        status: 'ready'
-      });
+      villages.push({ id: parseInt(vm[1], 10), name: name || ('Village ' + coords), coords: coords,
+        coordsParsed: parsed, lcAvailable: lc, lcTotal: lc, targetsInRange: 0, status: 'ready' });
     });
 
-    // Check pagination
-    var hasNextPage = false;
-    $page.find('a.paged-nav-item, a[href*="page="]').each(function() {
-      var href = $(this).attr('href') || '';
-      var text = $.trim($(this).text());
-      if (text === '>>' || text === '>' || text.indexOf('next') !== -1 ||
-          text.indexOf('Next') !== -1 || text.indexOf('Dopredu') !== -1) {
-        hasNextPage = true;
-        return false;
-      }
+    var hasNext = false;
+    $p.find('a.paged-nav-item, a[href*="page="]').each(function() {
+      var txt = $.trim($(this).text());
+      if (txt === '>>' || txt === '>' || /next|Dopredu/i.test(txt)) { hasNext = true; return false; }
     });
-
-    return { villages: villages, hasNextPage: hasNextPage };
+    return { villages: villages, hasNextPage: hasNext };
   }
 
   // ============================================================
   // DATA FETCHING — OUTGOING ATTACKS
   // ============================================================
 
-  /**
-   * Fetch outgoing attack commands for collision avoidance.
-   * @param {function(OutgoingAttack[])} callback - Called with attack data.
-   * @param {function(string)} statusCb - Status update callback.
-   */
   function fetchOutgoingAttacks(callback, statusCb) {
     if (statusCb) statusCb('Fetching outgoing attacks...');
+    var attacks = [], page = 0;
 
-    var attacks = [];
-    var page = 0;
-
-    function fetchPage() {
-      var villageId = TWTools.getVillageId();
-      var url = '/game.php?village=' + villageId + '&screen=overview_villages&mode=commands&type=attack&page=' + page;
-
-      $.ajax({
-        url: url,
-        dataType: 'html',
-        timeout: 15000,
+    (function fetchPage() {
+      var url = '/game.php?village=' + TWTools.getVillageId() +
+        '&screen=overview_villages&mode=commands&type=attack&page=' + page;
+      $.ajax({ url: url, dataType: 'html', timeout: 15000,
         success: function(html) {
-          var result = parseOutgoingAttacks(html);
-          attacks = attacks.concat(result.attacks);
-
-          if (result.hasNextPage) {
-            page++;
-            setTimeout(fetchPage, 200);
-          } else {
-            callback(attacks);
-          }
+          var r = parseOutgoingAttacks(html);
+          attacks = attacks.concat(r.attacks);
+          if (r.hasNextPage) { page++; setTimeout(fetchPage, 200); }
+          else callback(attacks);
         },
-        error: function() {
-          if (statusCb) statusCb('Error fetching commands (continuing without collision data).');
-          callback([]);
-        }
+        error: function() { if (statusCb) statusCb('Error fetching commands.'); callback([]); }
       });
-    }
-
-    fetchPage();
+    })();
   }
 
-  /**
-   * Parse outgoing attack commands from the commands overview HTML.
-   * @param {string} html - Raw HTML.
-   * @returns {{attacks: OutgoingAttack[], hasNextPage: boolean}} Parsed data.
-   */
   function parseOutgoingAttacks(html) {
-    var $page = $('<div/>').html(html);
-    var attacks = [];
+    var $p = $('<div/>').html(html), attacks = [];
+    var $t = $p.find('#commands_table, table.vis.overview_table');
+    if (!$t.length) $t = $p.find('table.vis').filter(function() { return $(this).find('tr').length > 2; }).first();
+    if (!$t.length) return { attacks: [], hasNextPage: false };
 
-    var $table = $page.find('#commands_table, table.vis.overview_table');
-    if ($table.length === 0) {
-      $table = $page.find('table.vis').filter(function() {
-        return $(this).find('tr').length > 2;
-      }).first();
-    }
-
-    if ($table.length === 0) {
-      return { attacks: [], hasNextPage: false };
-    }
-
-    $table.find('tbody tr, tr').not(':first').each(function() {
-      var $row = $(this);
-      var $cells = $row.find('td');
-      if ($cells.length < 3) return;
-
-      // Look for target village link with coords
-      var targetCoords = '';
-      var sourceId = 0;
-      var arrivalText = '';
-
-      // Command rows typically have: [icon] [source] [target] [arrival]
-      $row.find('a[href*="village="]').each(function() {
-        var text = $.trim($(this).text());
-        var coordMatch = text.match(/\((\d{1,3}\|\d{1,3})\)/);
-        if (coordMatch) {
-          // The last village link with coords is usually the target
-          targetCoords = coordMatch[1];
-        }
+    $t.find('tbody tr, tr').not(':first').each(function() {
+      var $r = $(this), $c = $r.find('td');
+      if ($c.length < 3) return;
+      var tgtCoords = '', srcId = 0, arrText = '';
+      $r.find('a[href*="village="]').each(function() {
+        var cm = $.trim($(this).text()).match(/\((\d{1,3}\|\d{1,3})\)/);
+        if (cm) tgtCoords = cm[1];
       });
-
-      // Look for source village ID
-      var $sourceLink = $row.find('a[href*="village="]').first();
-      if ($sourceLink.length > 0) {
-        var srcHref = $sourceLink.attr('href') || '';
-        var srcMatch = srcHref.match(/village=(\d+)/);
-        if (srcMatch) sourceId = parseInt(srcMatch[1], 10);
-      }
-
-      // Look for arrival time — typically last cell or cell with time pattern
-      $cells.each(function() {
-        var cellText = $.trim($(this).text());
-        if (cellText.match(/\d{1,2}:\d{2}:\d{2}/)) {
-          arrivalText = cellText;
-        }
-      });
-
-      if (targetCoords && arrivalText) {
-        var arrivalMs = TWTools.parseArrivalTime(arrivalText);
-        if (arrivalMs !== null) {
-          attacks.push({
-            targetCoords: targetCoords,
-            arrivalMs: arrivalMs,
-            sourceId: sourceId
-          });
-        }
+      var $sl = $r.find('a[href*="village="]').first();
+      if ($sl.length) { var sm = ($sl.attr('href') || '').match(/village=(\d+)/); if (sm) srcId = parseInt(sm[1], 10); }
+      $c.each(function() { var ct = $.trim($(this).text()); if (ct.match(/\d{1,2}:\d{2}:\d{2}/)) arrText = ct; });
+      if (tgtCoords && arrText) {
+        var ms = TWTools.parseArrivalTime(arrText);
+        if (ms !== null) attacks.push({ targetCoords: tgtCoords, arrivalMs: ms, sourceId: srcId });
       }
     });
 
-    // Check pagination
-    var hasNextPage = false;
-    $page.find('a.paged-nav-item, a[href*="page="]').each(function() {
-      var text = $.trim($(this).text());
-      if (text === '>>' || text === '>' || text.indexOf('next') !== -1 ||
-          text.indexOf('Next') !== -1 || text.indexOf('Dopredu') !== -1) {
-        hasNextPage = true;
-        return false;
-      }
+    var hasNext = false;
+    $p.find('a.paged-nav-item, a[href*="page="]').each(function() {
+      var txt = $.trim($(this).text());
+      if (txt === '>>' || txt === '>' || /next|Dopredu/i.test(txt)) { hasNext = true; return false; }
     });
-
-    return { attacks: attacks, hasNextPage: hasNextPage };
+    return { attacks: attacks, hasNextPage: hasNext };
   }
 
   // ============================================================
   // DATA FETCHING — FARM TARGETS
   // ============================================================
 
-  /**
-   * Fetch farm targets from the Farm Assistant (am_farm) pages.
-   * Handles pagination via Farm_page parameter.
-   * Also extracts CSRF token and send_units_link.
-   * @param {function(FarmTarget[])} callback - Called with farm target data.
-   * @param {function(string)} statusCb - Status update callback.
-   */
-  function fetchFarmTargets(callback, statusCb) {
-    if (statusCb) statusCb('Fetching farm targets...');
-
-    var targets = [];
-    var page = 0;
-
-    function fetchPage() {
-      var villageId = TWTools.getVillageId();
-      var url = '/game.php?village=' + villageId + '&screen=am_farm&Farm_page=' + page;
-
-      $.ajax({
-        url: url,
-        dataType: 'html',
-        timeout: 15000,
-        success: function(html) {
-          var result = parseFarmTargets(html);
-          targets = targets.concat(result.targets);
-
-          // Extract CSRF and send link from first page
-          if (page === 0) {
-            if (result.csrf) csrfToken = result.csrf;
-            if (result.sendLink) sendUnitsLink = result.sendLink;
-          }
-
-          if (statusCb) {
-            statusCb('Farm targets: loaded page ' + (page + 1) + ' (' + targets.length + ' targets)...');
-          }
-
-          if (result.hasNextPage) {
-            page++;
-            setTimeout(fetchPage, 200);
-          } else {
-            callback(targets);
-          }
-        },
-        error: function() {
-          if (statusCb) statusCb('Error fetching farm targets.');
-          callback([]);
-        }
-      });
-    }
-
-    fetchPage();
+  function readAccountmanagerGlobals() {
+    try {
+      if (typeof Accountmanager !== 'undefined' && Accountmanager.farm && Accountmanager.farm.templates) {
+        var keys = Object.keys(Accountmanager.farm.templates).filter(function(k) { return k.indexOf('t_') === 0; }).sort();
+        if (keys.length >= 1) realTemplateA = parseInt(keys[0].replace('t_', ''), 10);
+        if (keys.length >= 2) realTemplateB = parseInt(keys[1].replace('t_', ''), 10);
+      }
+    } catch (e) {}
+    try { if (typeof Accountmanager !== 'undefined' && Accountmanager.send_units_link) sendUnitsLink = Accountmanager.send_units_link; } catch (e) {}
+    if (typeof game_data !== 'undefined' && game_data.csrf) csrfToken = game_data.csrf;
   }
 
-  /**
-   * Parse farm targets from the Farm Assistant HTML page.
-   * @param {string} html - Raw HTML.
-   * @returns {{targets: FarmTarget[], hasNextPage: boolean, csrf: string, sendLink: string}}
-   */
+  function fetchFarmTargets(callback, statusCb) {
+    if (statusCb) statusCb('Reading farm targets...');
+    readAccountmanagerGlobals();
+
+    // Parse from live DOM (page 0)
+    var domHtml = document.getElementById('contentContainer')
+      ? document.getElementById('contentContainer').innerHTML : document.body.innerHTML;
+    var r0 = parseFarmTargets(domHtml);
+    var targets = r0.targets;
+    if (r0.csrf && !csrfToken) csrfToken = r0.csrf;
+    if (r0.sendLink && !sendUnitsLink) sendUnitsLink = r0.sendLink;
+    if (statusCb) statusCb('Farm targets: page 1 (' + targets.length + ' targets)...');
+
+    if (!r0.hasNextPage) { callback(targets); return; }
+
+    var page = 1;
+    (function fetchNext() {
+      var url = '/game.php?village=' + TWTools.getVillageId() + '&screen=am_farm&Farm_page=' + page;
+      $.ajax({ url: url, dataType: 'html', timeout: 15000,
+        success: function(html) {
+          var rp = parseFarmTargets(html);
+          targets = targets.concat(rp.targets);
+          if (statusCb) statusCb('Farm targets: page ' + (page + 1) + ' (' + targets.length + ')...');
+          if (rp.hasNextPage) { page++; setTimeout(fetchNext, 200); } else callback(targets);
+        },
+        error: function() { callback(targets); }
+      });
+    })();
+  }
+
   function parseFarmTargets(html) {
-    var $page = $('<div/>').html(html);
-    var targets = [];
-    var csrf = '';
-    var sendLink = '';
+    var $p = $('<div/>').html(html), targets = [], csrf = '', sendLink = '';
 
-    // Extract CSRF token
-    // game_data.csrf is available globally, but also look for it in the page
-    if (typeof game_data !== 'undefined' && game_data.csrf) {
-      csrf = game_data.csrf;
-    }
-    // Fallback: look for h= parameter in farm action URLs
-    var $formAction = $page.find('form[action*="am_farm"]');
-    if ($formAction.length > 0) {
-      var action = $formAction.attr('action') || '';
-      var hMatch = action.match(/[&?]h=([a-f0-9]+)/);
-      if (hMatch) csrf = hMatch[1];
-    }
-
-    // Also extract from any link with am_farm and h=
-    $page.find('a[href*="am_farm"][href*="h="]').first().each(function() {
-      var href = $(this).attr('href') || '';
-      var hMatch = href.match(/[&?]h=([a-f0-9]+)/);
-      if (hMatch && !csrf) csrf = hMatch[1];
+    // CSRF
+    if (typeof game_data !== 'undefined' && game_data.csrf) csrf = game_data.csrf;
+    $p.find('form[action*="am_farm"]').each(function() {
+      var hm = ($(this).attr('action') || '').match(/[&?]h=([a-f0-9]+)/);
+      if (hm) csrf = hm[1];
+    });
+    if (!csrf) $p.find('a[href*="am_farm"][href*="h="]').first().each(function() {
+      var hm = ($(this).attr('href') || '').match(/[&?]h=([a-f0-9]+)/); if (hm) csrf = hm[1];
     });
 
-    // Extract real template IDs from Accountmanager.farm
-    // Templates are stored as t_NNNN keys (e.g., t_3640, t_3641), NOT as .a/.b
-    // The first template = A, second = B (sorted by ID ascending)
-    try {
-      if (typeof Accountmanager !== 'undefined' && Accountmanager.farm &&
-          Accountmanager.farm.templates) {
-        var tmplKeys = Object.keys(Accountmanager.farm.templates)
-          .filter(function(k) { return k.indexOf('t_') === 0; })
-          .sort();
-        if (tmplKeys.length >= 1) {
-          realTemplateA = parseInt(tmplKeys[0].replace('t_', ''), 10);
-        }
-        if (tmplKeys.length >= 2) {
-          realTemplateB = parseInt(tmplKeys[1].replace('t_', ''), 10);
-        }
-      }
-    } catch (e) {
-      // Accountmanager may not be fully initialized
-    }
-
-    // Extract template IDs from am_farm HTML.
-    // The A/B farm buttons use: onclick="return Accountmanager.farm.sendUnits(this, TARGET_ID, TEMPLATE_ID)"
-    // Template A buttons have class "farm_icon_a", Template B have "farm_icon_b".
-    // We just need ONE of each to get the template IDs.
+    // Template IDs from HTML fallback
+    var hs = typeof html === 'string' ? html : '';
     if (realTemplateA === null) {
-      var htmlStr0 = typeof html === 'string' ? html : '';
-      // Match: farm_icon_a" ... sendUnits(this, NNNN, TEMPLATE_A_ID)
-      var tmplMatchA = htmlStr0.match(/farm_icon_a[^>]*sendUnits\(\s*this\s*,\s*\d+\s*,\s*(\d+)\s*\)/);
-      if (tmplMatchA) realTemplateA = parseInt(tmplMatchA[1], 10);
-      // Also try templates['t_NNNN'] from script blocks
-      if (realTemplateA === null) {
-        var tmplStoreA = htmlStr0.match(/templates\['t_(\d+)'\]/);
-        if (tmplStoreA) realTemplateA = parseInt(tmplStoreA[1], 10);
-      }
+      var mA = hs.match(/farm_icon_a[^>]*sendUnits\(\s*this\s*,\s*\d+\s*,\s*(\d+)\s*\)/);
+      if (mA) realTemplateA = parseInt(mA[1], 10);
+      if (realTemplateA === null) { var ms = hs.match(/templates\['t_(\d+)'\]/); if (ms) realTemplateA = parseInt(ms[1], 10); }
     }
     if (realTemplateB === null) {
-      var htmlStr0b = typeof html === 'string' ? html : '';
-      var tmplMatchB = htmlStr0b.match(/farm_icon_b[^>]*sendUnits\(\s*this\s*,\s*\d+\s*,\s*(\d+)\s*\)/);
-      if (tmplMatchB) realTemplateB = parseInt(tmplMatchB[1], 10);
+      var mB = hs.match(/farm_icon_b[^>]*sendUnits\(\s*this\s*,\s*\d+\s*,\s*(\d+)\s*\)/);
+      if (mB) realTemplateB = parseInt(mB[1], 10);
     }
 
-    // Try to get send_units_link from TW's global Accountmanager object (most reliable)
-    if (typeof Accountmanager !== 'undefined' && Accountmanager.send_units_link) {
-      sendLink = Accountmanager.send_units_link;
-    }
-
-    // Extract send_units_link from inline script blocks in the AJAX-fetched HTML
-    // Pattern: Accountmanager.send_units_link = '/game.php?village=...&ajaxaction=farm&json=1&h=...';
+    // send_units_link from script blocks
     if (!sendLink) {
-      var htmlStr = typeof html === 'string' ? html : '';
-      var sendLinkMatch = htmlStr.match(/Accountmanager\.send_units_link\s*=\s*'([^']+)'/);
-      if (!sendLinkMatch) sendLinkMatch = htmlStr.match(/send_units_link\s*[=:]\s*['"]([^'"]+)['"]/);
-      if (sendLinkMatch) sendLink = sendLinkMatch[1];
+      var slm = hs.match(/Accountmanager\.send_units_link\s*=\s*'([^']+)'/) || hs.match(/send_units_link\s*[=:]\s*['"]([^'"]+)['"]/);
+      if (slm) sendLink = slm[1];
     }
 
-    // Parse the #plunder_list table
-    var $plunderTable = $page.find('#plunder_list');
-    if ($plunderTable.length === 0) {
-      $plunderTable = $page.find('table.vis').filter(function() {
-        return $(this).find('.farm_icon, .farm_icon_a, .farm_icon_b, [class*="farm_icon"]').length > 0 ||
-               $(this).find('a[href*="am_farm"]').length > 0;
-      }).first();
-    }
+    // Parse #plunder_list
+    var $pt = $p.find('#plunder_list');
+    if (!$pt.length) $pt = $p.find('table.vis').filter(function() {
+      return $(this).find('.farm_icon, .farm_icon_a, .farm_icon_b').length > 0;
+    }).first();
 
-    if ($plunderTable.length > 0) {
-      $plunderTable.find('tr[id], tr.row_a, tr.row_b, tbody tr').each(function() {
-        var $row = $(this);
-        var $cells = $row.find('td');
-        if ($cells.length < 3) return;
+    if ($pt.length) {
+      var todayWords = TWTools.DATE_WORDS ? TWTools.DATE_WORDS.today : ['dnes', 'today'];
 
-        // Extract target village ID from the row or links
-        var targetId = 0;
-        var targetCoords = '';
-        var playerName = '';
-        var lootStatus = LOOT_STATUS.UNKNOWN;
-        var maxLoot = false;
-        var wallLevel = 0;
+      $pt.find('tr[id], tr.row_a, tr.row_b, tbody tr').each(function() {
+        var $r = $(this), $c = $r.find('td');
+        if ($c.length < 3) return;
 
-        // Row ID often contains village_id: "farm_row_XXXXX"
-        var rowId = $row.attr('id') || '';
-        var rowIdMatch = rowId.match(/(\d+)/);
-        if (rowIdMatch) {
-          targetId = parseInt(rowIdMatch[1], 10);
+        var tId = 0, tCoords = '', player = '', loot = LOOT.UNKNOWN, maxLoot = false, wall = 0;
+
+        // Row ID: "farm_row_XXXXX"
+        var rm = ($r.attr('id') || '').match(/(\d+)/);
+        if (rm) tId = parseInt(rm[1], 10);
+
+        $r.find('a[href*="info_village"]').each(function() {
+          var cm = $.trim($(this).text()).match(/(\d{1,3}\|\d{1,3})/);
+          if (cm) tCoords = cm[1];
+          if (!tId) { var vm = ($(this).attr('href') || '').match(/id=(\d+)/); if (vm) tId = parseInt(vm[1], 10); }
+        });
+        if (!tCoords) $c.each(function() { var cm = $.trim($(this).text()).match(/(\d{1,3}\|\d{1,3})/); if (cm && !tCoords) tCoords = cm[1]; });
+
+        $r.find('a[href*="info_player"]').each(function() { player = $.trim($(this).text()); });
+
+        // Loot status
+        var $ri = $r.find('img[src*="dots"], img[src*="report"]');
+        if ($ri.length) {
+          var src = $ri.attr('src') || '';
+          if (src.indexOf('green') !== -1) loot = LOOT.GREEN;
+          else if (src.indexOf('yellow') !== -1) loot = LOOT.YELLOW;
+          else if (src.indexOf('red') !== -1) loot = LOOT.RED;
         }
+        var $sc = $r.find('.report-status, [class*="dot"]');
+        if ($sc.length) {
+          var cls = $sc.attr('class') || '';
+          if (cls.indexOf('green') !== -1) loot = LOOT.GREEN;
+          else if (cls.indexOf('yellow') !== -1) loot = LOOT.YELLOW;
+          else if (cls.indexOf('red') !== -1) loot = LOOT.RED;
+        }
+        if ($r.find('img[src*="max_loot"], img[src*="haul"]').length) maxLoot = true;
 
-        // Look for village link with coords
-        $row.find('a[href*="info_village"]').each(function() {
-          var text = $.trim($(this).text());
-          var coordMatch = text.match(/(\d{1,3}\|\d{1,3})/);
-          if (coordMatch) targetCoords = coordMatch[1];
-          // Extract village ID from href
-          if (!targetId) {
-            var href = $(this).attr('href') || '';
-            var vMatch = href.match(/id=(\d+)/);
-            if (vMatch) targetId = parseInt(vMatch[1], 10);
+        // Last report time
+        var lastMs = 0;
+        $c.each(function() {
+          var txt = $.trim($(this).text());
+          for (var w = 0; w < todayWords.length; w++) {
+            var rgx = new RegExp(todayWords[w] + '\\s+(\\d{1,2}):(\\d{2}):(\\d{2})', 'i');
+            var tm = txt.match(rgx);
+            if (tm) { lastMs = (parseInt(tm[1], 10) * 3600 + parseInt(tm[2], 10) * 60 + parseInt(tm[3], 10)) * 1000; return false; }
           }
         });
 
-        // Also try coord text in cells
-        if (!targetCoords) {
-          $cells.each(function() {
-            var text = $.trim($(this).text());
-            var coordMatch = text.match(/(\d{1,3}\|\d{1,3})/);
-            if (coordMatch && !targetCoords) {
-              targetCoords = coordMatch[1];
-            }
-          });
-        }
+        // Active attack check
+        var $bA = $r.find('.farm_icon_a');
+        var hasActive = $bA.length > 0 && ($bA.hasClass('done') || ($bA.hasClass('farm_icon_disabled') && !$bA.hasClass('start_locked')));
 
-        // Player name — usually in a cell after coords
-        $row.find('a[href*="info_player"]').each(function() {
-          playerName = $.trim($(this).text());
+        // Wall
+        $c.each(function() {
+          var txt = $.trim($(this).text());
+          if (txt.match(/^\d{1,2}$/) && !txt.match(/\|/)) { var w2 = parseInt(txt, 10); if (w2 <= 20 && w2 >= 0) wall = w2; }
         });
 
-        // Loot status — based on report icon color
-        var $reportIcon = $row.find('img[src*="dots"], img[src*="report"]');
-        if ($reportIcon.length > 0) {
-          var src = $reportIcon.attr('src') || '';
-          if (src.indexOf('green') !== -1) {
-            lootStatus = LOOT_STATUS.GREEN;
-          } else if (src.indexOf('yellow') !== -1) {
-            lootStatus = LOOT_STATUS.YELLOW;
-          } else if (src.indexOf('red') !== -1) {
-            lootStatus = LOOT_STATUS.RED;
-          }
-        }
-
-        // Also check for CSS class-based status
-        var $statusCell = $row.find('.report-status, [class*="dot"]');
-        if ($statusCell.length > 0) {
-          var cls = $statusCell.attr('class') || '';
-          if (cls.indexOf('green') !== -1) lootStatus = LOOT_STATUS.GREEN;
-          else if (cls.indexOf('yellow') !== -1) lootStatus = LOOT_STATUS.YELLOW;
-          else if (cls.indexOf('red') !== -1) lootStatus = LOOT_STATUS.RED;
-        }
-
-        // Max loot flag — full haul indicator
-        var $fullHaul = $row.find('img[src*="max_loot"], img[src*="haul"]');
-        if ($fullHaul.length > 0) {
-          maxLoot = true;
-        }
-
-        // Last report time — column with "dnes HH:MM:SS" or "DD.MM. HH:MM:SS"
-        var lastReportMs = 0;
-        $cells.each(function() {
-          var text = $.trim($(this).text());
-          // "dnes HH:MM:SS" = today at HH:MM:SS
-          var todayMatch = text.match(/dnes\s+(\d{1,2}):(\d{2}):(\d{2})/i);
-          if (todayMatch) {
-            lastReportMs = (parseInt(todayMatch[1], 10) * 3600 +
-              parseInt(todayMatch[2], 10) * 60 +
-              parseInt(todayMatch[3], 10)) * 1000;
-            return;
-          }
-          // "today HH:MM:SS" (English)
-          var todayMatchEn = text.match(/today\s+(\d{1,2}):(\d{2}):(\d{2})/i);
-          if (todayMatchEn) {
-            lastReportMs = (parseInt(todayMatchEn[1], 10) * 3600 +
-              parseInt(todayMatchEn[2], 10) * 60 +
-              parseInt(todayMatchEn[3], 10)) * 1000;
-            return;
-          }
-          // "DD.MM. HH:MM:SS" or "DD/MM HH:MM:SS" — older report, treat as expired (0)
-        });
-
-        // Check if A/B buttons are disabled (attack already sent, troops en route)
-        // TW adds .farm_icon_disabled when you can't send, and .done after an attack is sent
-        var $btnA = $row.find('.farm_icon_a');
-        var hasActiveAttack = $btnA.length > 0 && (
-          $btnA.hasClass('done') ||
-          ($btnA.hasClass('farm_icon_disabled') && !$btnA.hasClass('start_locked'))
-        );
-
-        // Wall level — sometimes shown in a cell
-        $cells.each(function() {
-          var text = $.trim($(this).text());
-          if (text.match(/^\d{1,2}$/) && !text.match(/\|/)) {
-            var candidate = parseInt(text, 10);
-            if (candidate <= 20 && candidate >= 0) {
-              wallLevel = candidate;
-            }
-          }
-        });
-
-        if (targetCoords) {
-          var parsed = TWTools.parseCoords(targetCoords);
-          if (parsed) {
-            targets.push({
-              id: targetId,
-              coords: targetCoords,
-              coordsParsed: parsed,
-              playerName: playerName,
-              lootStatus: lootStatus,
-              maxLoot: maxLoot,
-              wallLevel: wallLevel,
-              lastReportMs: lastReportMs,
-              hasActiveAttack: hasActiveAttack,
-              distance: 0
-            });
-          }
+        if (tCoords) {
+          var parsed = TWTools.parseCoords(tCoords);
+          if (parsed) targets.push({ id: tId, coords: tCoords, coordsParsed: parsed, playerName: player,
+            lootStatus: loot, maxLoot: maxLoot, wallLevel: wall, lastReportMs: lastMs, hasActiveAttack: hasActive, distance: 0 });
         }
       });
     }
 
-    // Check pagination — Farm Assistant uses Farm_page
-    var hasNextPage = false;
-    $page.find('a[href*="Farm_page"]').each(function() {
-      var text = $.trim($(this).text());
-      if (text === '>>' || text === '>' || text.indexOf('next') !== -1 ||
-          text.indexOf('Next') !== -1 || text.indexOf('Dopredu') !== -1 ||
-          text === String(parseInt(text, 10)) && parseInt(text, 10) > 0) {
-        // Check if this points to a higher page number
-        var href = $(this).attr('href') || '';
-        var pageMatch = href.match(/Farm_page=(\d+)/);
-        if (pageMatch) {
-          var linkedPage = parseInt(pageMatch[1], 10);
-          // Pages are 0-indexed internally
-          hasNextPage = true;
-        }
-      }
+    // Pagination
+    var hasNext = false;
+    $p.find('a[href*="Farm_page"]').each(function() {
+      var txt = $.trim($(this).text()), href = $(this).attr('href') || '';
+      if ((txt === '>>' || txt === '>' || /next|Dopredu/i.test(txt)) && href.match(/Farm_page=\d+/)) hasNext = true;
+    });
+    $p.find('.paged-nav-item').each(function() {
+      var txt = $.trim($(this).text());
+      if (txt === '>' || txt === '>>') { hasNext = true; return false; }
     });
 
-    // More reliable: check if the "next" navigation arrow exists
-    $page.find('.paged-nav-item').each(function() {
-      var text = $.trim($(this).text());
-      if (text === '>' || text === '>>') {
-        hasNextPage = true;
-        return false;
-      }
-    });
-
-    return {
-      targets: targets,
-      hasNextPage: hasNextPage,
-      csrf: csrf,
-      sendLink: sendLink
-    };
+    return { targets: targets, hasNextPage: hasNext, csrf: csrf, sendLink: sendLink };
   }
 
   // ============================================================
-  // SCANNING — PARALLEL DATA COLLECTION
+  // SCANNING
   // ============================================================
 
-  /**
-   * Run the full scan: fetch sources, attacks, and farm targets in parallel.
-   * @param {function()} callback - Called when all data is ready.
-   * @param {function(string)} statusCb - Status update callback.
-   */
   function runScan(callback, statusCb) {
-    if (isScanning) {
-      TWTools.UI.toast('Scan already in progress...', 'warning');
-      return;
-    }
-
+    if (isScanning) { TWTools.UI.toast('Scan already in progress...', 'warning'); return; }
     isScanning = true;
-    var completed = 0;
-    var total = 3;
-
-    // Ensure we have CSRF token from game_data
-    if (typeof game_data !== 'undefined' && game_data.csrf) {
-      csrfToken = game_data.csrf;
+    if (typeof game_data !== 'undefined' && game_data.csrf) csrfToken = game_data.csrf;
+    var done = 0;
+    function check() {
+      done++;
+      if (statusCb) statusCb('Scanning... (' + done + '/3)');
+      if (done < 3) return;
+      isScanning = false;
+      updateTargetsInRange();
+      var totalLC = 0;
+      for (var i = 0; i < sourceVillages.length; i++) totalLC += sourceVillages[i].lcAvailable || 0;
+      if (statusCb) statusCb('Scanned: ' + sourceVillages.length + ' sources (' + totalLC + ' LC), ' +
+        farmTargets.length + ' targets, ' + outgoingAttacks.length + ' outgoing.');
+      callback();
     }
-
-    function checkDone() {
-      completed++;
-      if (statusCb) {
-        statusCb('Scanning... (' + completed + '/' + total + ' complete)');
-      }
-      if (completed >= total) {
-        isScanning = false;
-        // Count targets in range for each source
-        updateTargetsInRange();
-        var totalLC = 0;
-        for (var si = 0; si < sourceVillages.length; si++) {
-          totalLC += sourceVillages[si].lcAvailable || 0;
-        }
-        if (statusCb) {
-          statusCb('Scanned: ' + sourceVillages.length + ' villages (' + totalLC + ' LC available), ' +
-            farmTargets.length + ' targets, ' + outgoingAttacks.length + ' outgoing attacks.');
-        }
-        callback();
-      }
-    }
-
-    // Fetch all three data sources in parallel
-    fetchSourceVillages(function(villages) {
-      sourceVillages = villages;
-      checkDone();
-    }, statusCb);
-
-    fetchOutgoingAttacks(function(attacks) {
-      outgoingAttacks = attacks;
-      checkDone();
-    }, statusCb);
-
-    fetchFarmTargets(function(targets) {
-      farmTargets = targets;
-      checkDone();
-    }, statusCb);
+    fetchSourceVillages(function(v) { sourceVillages = v; check(); }, statusCb);
+    fetchOutgoingAttacks(function(a) { outgoingAttacks = a; check(); }, statusCb);
+    fetchFarmTargets(function(t) { farmTargets = t; check(); }, statusCb);
   }
 
-  /**
-   * Update targetsInRange count for each source village.
-   */
   function updateTargetsInRange() {
     for (var i = 0; i < sourceVillages.length; i++) {
-      var src = sourceVillages[i];
-      var count = 0;
+      var s = sourceVillages[i], c = 0;
       for (var j = 0; j < farmTargets.length; j++) {
-        var dist = TWTools.distance(src.coordsParsed, farmTargets[j].coordsParsed);
-        if (dist <= settings.maxDistance) count++;
+        if (TWTools.distance(s.coordsParsed, farmTargets[j].coordsParsed) <= settings.maxDistance) c++;
       }
-      src.targetsInRange = count;
+      s.targetsInRange = c;
     }
   }
 
@@ -997,721 +380,413 @@
   // PLANNING ENGINE
   // ============================================================
 
-  /**
-   * Check if a target has a collision (existing attack arriving within cooldown).
-   * @param {string} targetCoords - Target coordinates.
-   * @param {number} estimatedArrivalMs - Estimated arrival of new attack (ms since midnight).
-   * @returns {boolean} True if collision detected.
-   */
-  function hasCollision(targetCoords, estimatedArrivalMs) {
-    var cooldownMs = settings.cooldownMinutes * 60 * 1000;
-
+  function hasCollision(tgtCoords, estArrival) {
+    var cdMs = settings.cooldownMinutes * 60000;
     for (var i = 0; i < outgoingAttacks.length; i++) {
-      var atk = outgoingAttacks[i];
-      if (atk.targetCoords !== targetCoords) continue;
-
-      var diff = Math.abs(atk.arrivalMs - estimatedArrivalMs);
-      if (diff < cooldownMs) return true;
+      var a = outgoingAttacks[i];
+      if (a.targetCoords === tgtCoords && Math.abs(a.arrivalMs - estArrival) < cdMs) return true;
     }
-
     return false;
   }
 
-  /**
-   * Build the farm plan based on scanned data.
-   * For each source village, sort targets by distance and assign templates.
-   * @param {function(string)} statusCb - Status update callback.
-   * @returns {FarmPlanEntry[]} The generated plan.
-   */
   function buildPlan(statusCb) {
     farmPlan = [];
-
-    if (sourceVillages.length === 0) {
-      if (statusCb) statusCb('No source villages. Run scan first.');
-      return farmPlan;
-    }
-
-    if (farmTargets.length === 0) {
-      if (statusCb) statusCb('No farm targets. Check Farm Assistant settings.');
-      return farmPlan;
-    }
-
+    if (!sourceVillages.length) { if (statusCb) statusCb('No source villages.'); return farmPlan; }
+    if (!farmTargets.length) { if (statusCb) statusCb('No farm targets.'); return farmPlan; }
     if (realTemplateA === null) {
-      if (statusCb) statusCb('No Farm Assistant templates configured! Go to Farm Assistant and set up Template A/B first.');
-      TWTools.UI.toast('Farm Assistant templates not configured! Open Farm Assistant (am_farm) and set up Template A first.', 'error');
+      if (statusCb) statusCb('No templates configured!');
+      TWTools.UI.toast('Set up Template A/B in Farm Assistant first.', 'error');
       return farmPlan;
     }
 
-    // Get world speed info for travel time calculation
-    var worldSpeed = 1;
-    var unitSpeedFactor = 1;
-    if (TWTools.DataFetcher._worldConfig) {
-      worldSpeed = TWTools.DataFetcher._worldConfig.speed || 1;
-      unitSpeedFactor = TWTools.DataFetcher._worldConfig.unitSpeed || 1;
-    }
-
-    // Track which targets have been assigned (for collision with newly planned attacks)
-    var plannedArrivals = {}; // targetCoords -> [arrivalMs, ...]
-
-    // Build a copy of LC availability to track usage
-    var lcPool = {};
-    for (var si = 0; si < sourceVillages.length; si++) {
-      lcPool[sourceVillages[si].id] = sourceVillages[si].lcAvailable;
-    }
-
-    var nowMs = TWTools.TimeSync.now();
-    var cooldownMs = settings.cooldownMinutes * 60 * 1000;
+    var ws = 1, usf = 1;
+    if (TWTools.DataFetcher._worldConfig) { ws = TWTools.DataFetcher._worldConfig.speed || 1; usf = TWTools.DataFetcher._worldConfig.unitSpeed || 1; }
+    var planned = {}, lcPool = {}, nowMs = TWTools.TimeSync.now(), cdMs = settings.cooldownMinutes * 60000;
+    for (var si = 0; si < sourceVillages.length; si++) lcPool[sourceVillages[si].id] = sourceVillages[si].lcAvailable;
 
     for (var i = 0; i < sourceVillages.length; i++) {
-      var src = sourceVillages[i];
-
-      // Sort targets by distance from this source
-      var targetsByDist = [];
+      var src = sourceVillages[i], byDist = [];
       for (var j = 0; j < farmTargets.length; j++) {
-        var tgt = farmTargets[j];
-        var dist = TWTools.distance(src.coordsParsed, tgt.coordsParsed);
-        if (dist <= settings.maxDistance) {
-          targetsByDist.push({
-            target: tgt,
-            distance: dist
-          });
-        }
+        var d = TWTools.distance(src.coordsParsed, farmTargets[j].coordsParsed);
+        if (d <= settings.maxDistance) byDist.push({ target: farmTargets[j], distance: d });
       }
+      byDist.sort(function(a, b) { return a.distance - b.distance; });
 
-      targetsByDist.sort(function(a, b) {
-        return a.distance - b.distance;
-      });
-
-      // Assign targets while LC is available
-      for (var k = 0; k < targetsByDist.length; k++) {
+      for (var k = 0; k < byDist.length; k++) {
         if (lcPool[src.id] < settings.minLC) break;
+        var tgt = byDist[k].target, dist = byDist[k].distance;
+        var travelMs = TWTools.travelTime(dist, LC_SPEED, ws, usf), estArr = nowMs + travelMs;
 
-        var entry = targetsByDist[k];
-        var target = entry.target;
-        var distance = entry.distance;
-
-        // Calculate travel time
-        var travelMs = TWTools.travelTime(distance, LC_SPEED, worldSpeed, unitSpeedFactor);
-        var estimatedArrival = nowMs + travelMs;
-
-        // Skip targets with active attacks (Farm Assistant buttons disabled/done)
-        if (target.hasActiveAttack) continue;
-
-        // Check cooldown: skip if last report is too recent
-        // lastReportMs = time of last report (ms since midnight today, or 0 if older/unknown)
-        if (target.lastReportMs > 0) {
-          var timeSinceReport = nowMs - target.lastReportMs;
-          if (timeSinceReport < 0) timeSinceReport += 86400000;
-          if (timeSinceReport < cooldownMs) continue;
+        if (tgt.hasActiveAttack) continue;
+        if (tgt.lastReportMs > 0) {
+          var since = nowMs - tgt.lastReportMs; if (since < 0) since += 86400000;
+          if (since < cdMs) continue;
         }
+        if (hasCollision(tgt.coords, estArr)) continue;
+        var pf = planned[tgt.coords] || [], selfHit = false;
+        for (var p = 0; p < pf.length; p++) { if (Math.abs(pf[p] - estArr) < cdMs) { selfHit = true; break; } }
+        if (selfHit) continue;
 
-        // Check collision with existing outgoing attacks
-        if (hasCollision(target.coords, estimatedArrival)) continue;
+        var tmplId = realTemplateA, tmplLbl = 'A';
+        if (settings.useBForMaxLoot && tgt.maxLoot && realTemplateB !== null) { tmplId = realTemplateB; tmplLbl = 'B'; }
 
-        // Check collision with already-planned attacks in this batch
-        var plannedForTarget = plannedArrivals[target.coords] || [];
-        var selfCollision = false;
-        for (var p = 0; p < plannedForTarget.length; p++) {
-          if (Math.abs(plannedForTarget[p] - estimatedArrival) < cooldownMs) {
-            selfCollision = true;
-            break;
-          }
-        }
-        if (selfCollision) continue;
+        farmPlan.push({ sourceId: src.id, sourceName: src.name, sourceCoords: src.coords,
+          targetId: tgt.id, targetCoords: tgt.coords, distance: dist,
+          templateId: tmplId, templateLabel: tmplLbl, travelTimeMs: travelMs, estArrival: fmtTime(estArr) });
 
-        // Select template — use real IDs from Accountmanager if available
-        var templateId = realTemplateA !== null ? realTemplateA : TEMPLATE_A;
-        var templateLabel = 'A';
-        if (settings.useBForMaxLoot && target.maxLoot) {
-          templateId = realTemplateB !== null ? realTemplateB : TEMPLATE_B;
-          templateLabel = 'B';
-        }
-
-        // Add to plan
-        farmPlan.push({
-          sourceId: src.id,
-          sourceName: src.name,
-          sourceCoords: src.coords,
-          targetId: target.id,
-          targetCoords: target.coords,
-          distance: distance,
-          templateId: templateId,
-          templateLabel: templateLabel,
-          travelTimeMs: travelMs,
-          estArrival: formatTimeShort(estimatedArrival)
-        });
-
-        // Track this planned arrival
-        if (!plannedArrivals[target.coords]) {
-          plannedArrivals[target.coords] = [];
-        }
-        plannedArrivals[target.coords].push(estimatedArrival);
-
-        // Deduct LC (template uses some LC — approximate as minLC per attack)
+        if (!planned[tgt.coords]) planned[tgt.coords] = [];
+        planned[tgt.coords].push(estArr);
         lcPool[src.id] -= settings.minLC;
       }
     }
-
-    if (statusCb) {
-      statusCb('Plan ready: ' + farmPlan.length + ' attacks across ' + sourceVillages.length + ' villages.');
-    }
-
+    if (statusCb) statusCb('Plan: ' + farmPlan.length + ' attacks across ' + sourceVillages.length + ' villages.');
     return farmPlan;
   }
 
   // ============================================================
-  // EXECUTION — CLICK-THROUGH SEND UI
+  // SETTINGS DIALOG — Dialog.show('TWFarm', html)
   // ============================================================
 
-  /** @type {number} Current index in the farm plan click-through */
-  var farmClickIdx = 0;
-
-  /** @type {number} Number of successfully sent attacks this session */
-  var farmSentCount = 0;
-
-  /**
-   * Render the click-through farming UI.
-   * Shows one target at a time with a big SEND button.
-   * User clicks SEND → attack is sent via Accountmanager.farm.sendUnits() → auto-advances to next.
-   * @param {jQuery} $panel - The tab content panel.
-   */
-  function renderFarmClickUI($panel) {
-    var total = farmPlan.length;
-    var entry = farmClickIdx < total ? farmPlan[farmClickIdx] : null;
-
-    var html = '<div style="padding:6px;">';
-
-    // Progress header
-    html += '<div style="margin-bottom:8px;text-align:center;">' +
-      '<b style="font-size:12px;">' + (farmClickIdx + 1) + ' / ' + total + '</b>' +
-      ' <span style="font-size:10px;color:#7a6840;">(Sent: ' + farmSentCount + ')</span>' +
-      '</div>';
-
-    // Progress bar
-    var pct = total > 0 ? Math.round(((farmClickIdx) / total) * 100) : 0;
-    html += '<div style="margin-bottom:8px;background:#e8d8a8;border:1px solid #c0a060;border-radius:2px;height:12px;position:relative;">' +
-      '<div style="background:linear-gradient(to bottom,#6a9c2a,#4a7a1e);height:100%;width:' + pct + '%;border-radius:2px;transition:width 0.3s;"></div>' +
-    '</div>';
-
-    if (!entry) {
-      // All done
-      html += '<div style="text-align:center;padding:20px;">' +
-        '<b style="font-size:14px;color:#2e7d32;">All done!</b><br/>' +
-        '<span style="font-size:11px;">Sent: ' + farmSentCount + ' / ' + total + ' attacks</span><br/>' +
-        '<button class="btn" id="' + ID_PREFIX + 'back-btn" style="margin-top:10px;font-size:11px;">Back to Plan</button>' +
-      '</div>';
-    } else {
-      // Current target info
-      html += '<div style="background:#f0e0b0;border:1px solid #c0a060;border-radius:3px;padding:8px;margin-bottom:8px;">' +
-        '<table style="width:100%;font-size:11px;">' +
-        '<tr><td style="color:#7a6840;width:80px;">Source:</td><td><b>' + escapeHtml(entry.sourceName) + '</b> (' + entry.sourceCoords + ')</td></tr>' +
-        '<tr><td style="color:#7a6840;">Target:</td><td><b>(' + entry.targetCoords + ')</b></td></tr>' +
-        '<tr><td style="color:#7a6840;">Distance:</td><td>' + formatDist(entry.distance) + ' fields</td></tr>' +
-        '<tr><td style="color:#7a6840;">Template:</td><td><b style="font-size:14px;">' + entry.templateLabel + '</b>' +
-          ' (ID: ' + entry.templateId + ')</td></tr>' +
-        '<tr><td style="color:#7a6840;">Travel:</td><td>' + formatTravelTime(entry.travelTimeMs) + '</td></tr>' +
-        '<tr><td style="color:#7a6840;">Est. Arrival:</td><td style="font-family:monospace;">' + entry.estArrival + '</td></tr>' +
-        '</table>' +
-      '</div>';
-
-      // Big SEND button — same position every time for fast clicking
-      html += '<div style="text-align:center;margin-bottom:8px;">' +
-        '<button class="btn" id="' + ID_PREFIX + 'send-btn" ' +
-          'style="font-size:16px;font-weight:bold;padding:10px 40px;background:linear-gradient(to bottom,#6a9c2a,#4a7a1e);' +
-          'color:#fff;border:2px solid #3e5a10;border-radius:4px;cursor:pointer;min-width:200px;">' +
-          'SEND ' + entry.templateLabel +
-        '</button>' +
-      '</div>';
-
-      // Status line for feedback
-      html += '<div id="' + ID_PREFIX + 'send-status" style="text-align:center;font-size:10px;color:#7a6840;min-height:16px;"></div>';
-
-      // Skip / Back buttons
-      html += '<div style="text-align:center;margin-top:6px;">' +
-        '<button class="btn" id="' + ID_PREFIX + 'skip-btn" style="font-size:9px;margin-right:8px;">Skip &raquo;</button>' +
-        '<button class="btn" id="' + ID_PREFIX + 'back-btn" style="font-size:9px;">Cancel</button>' +
-      '</div>';
+  function showSettingsDialog() {
+    var grpOpts = '';
+    for (var i = 0; i < availableGroups.length; i++) {
+      grpOpts += '<option value="' + availableGroups[i].id + '"' +
+        (settings.groupId === availableGroups[i].id ? ' selected' : '') + '>' +
+        esc(availableGroups[i].name) + '</option>';
     }
 
-    html += '</div>';
-    $panel.html(html);
+    var h = '<div id="twf-dlg" style="padding:10px;min-width:320px;">' +
+      '<h3 style="margin:0 0 10px;font-size:13px;">TW Farm v' + VERSION + '</h3>' +
+      '<table class="vis" style="width:100%;">' +
+      '<tr class="row_a"><td style="width:140px;"><b>Village Group</b></td><td>' +
+        '<select id="twf-d-grp" style="font-size:11px;">' + grpOpts + '</select></td></tr>' +
+      '<tr class="row_b"><td><b>Max Distance</b></td><td>' +
+        '<input type="number" id="twf-d-dist" value="' + settings.maxDistance + '" style="width:50px;" min="1" max="100"> fields</td></tr>' +
+      '<tr class="row_a"><td><b>Cooldown</b></td><td>' +
+        '<input type="number" id="twf-d-cd" value="' + settings.cooldownMinutes + '" style="width:50px;" min="0" max="60"> min</td></tr>' +
+      '<tr class="row_b"><td><b>Min LC/village</b></td><td>' +
+        '<input type="number" id="twf-d-lc" value="' + settings.minLC + '" style="width:50px;" min="1" max="500"></td></tr>' +
+      '<tr class="row_a"><td><b>Use B for max loot</b></td><td>' +
+        '<input type="checkbox" id="twf-d-useb"' + (settings.useBForMaxLoot ? ' checked' : '') + '> ' +
+        'Send Template B to full-haul targets</td></tr>' +
+      '</table>' +
+      '<div style="padding:6px;background:#f0e0b0;border:1px solid #c0a060;border-radius:3px;margin:10px 0;font-size:10px;">' +
+        '<b>Templates:</b> A=' + (realTemplateA !== null ? realTemplateA : '<i>?</i>') +
+        ', B=' + (realTemplateB !== null ? realTemplateB : '<i>?</i>') +
+        ' | <b>Sources:</b> ' + sourceVillages.length +
+        ' | <b>Targets:</b> ' + farmTargets.length +
+      '</div>' +
+      '<div style="text-align:center;">' +
+        '<button class="btn" id="twf-d-save" style="margin-right:6px;">Save</button>' +
+        '<button class="btn" id="twf-d-plan" style="font-weight:bold;padding:4px 16px;' +
+          'background:linear-gradient(to bottom,#6a9c2a,#4a7a1e);color:#fff;border:1px solid #3e5a10;">' +
+          'Scan &amp; Plan</button>' +
+        '<button class="btn" id="twf-d-close" style="margin-left:6px;">Close</button>' +
+      '</div></div>';
 
-    // ---- Event bindings ----
-    $panel.off('.twfsend');
+    Dialog.show('TWFarm', h);
 
-    // SEND button — calls Accountmanager.farm.sendUnits if on am_farm, else AJAX
-    $panel.on('click.twfsend', '#' + ID_PREFIX + 'send-btn', function() {
-      var $btn = $(this);
-      if ($btn.prop('disabled')) return;
-      $btn.prop('disabled', true).text('Sending...');
+    setTimeout(function() {
+      $('#twf-d-save').on('click', function() { readDlgSettings(); saveSettings(); TWTools.UI.toast('Settings saved', 'success'); });
+      $('#twf-d-plan').on('click', function() { readDlgSettings(); saveSettings(); Dialog.close(); startScanAndPlan(); });
+      $('#twf-d-close').on('click', function() { Dialog.close(); });
+    }, 50);
+  }
 
-      var e = farmPlan[farmClickIdx];
-      if (!e) return;
+  function readDlgSettings() {
+    settings.groupId = $('#twf-d-grp').val() || '0';
+    settings.maxDistance = parseInt($('#twf-d-dist').val(), 10) || 20;
+    settings.cooldownMinutes = parseInt($('#twf-d-cd').val(), 10) || 5;
+    settings.minLC = parseInt($('#twf-d-lc').val(), 10) || 5;
+    settings.useBForMaxLoot = $('#twf-d-useb').is(':checked');
+  }
 
-      var $status = $panel.find('#' + ID_PREFIX + 'send-status');
-      $status.text('Sending attack to (' + e.targetCoords + ')...');
+  // ============================================================
+  // SCAN + PLAN WORKFLOW
+  // ============================================================
 
-      // Use Accountmanager.farm.sendUnits if available (on am_farm page)
-      if (typeof Accountmanager !== 'undefined' && Accountmanager.farm &&
-          typeof Accountmanager.farm.sendUnits === 'function') {
-        // Create a fake button element for sendUnits (it reads classes from the element)
-        var $fakeBtn = $('<a class="farm_icon farm_icon_' + (e.templateLabel === 'A' ? 'a' : 'b') + '"></a>');
-        $fakeBtn.appendTo('body');
-
-        // sendUnits: function(element, targetId, templateId)
-        // It calls TribalWars.post internally and updates unit counts
-        try {
-          Accountmanager.farm.sendUnits($fakeBtn[0], e.targetId, e.templateId);
-          // sendUnits is async — wait a bit for the POST to complete
-          setTimeout(function() {
-            $fakeBtn.remove();
-            farmSentCount++;
-            farmClickIdx++;
-            $status.css('color', '#2e7d32').text('Sent! Advancing...');
-            setTimeout(function() {
-              renderFarmClickUI($panel);
-            }, 300);
-          }, 500);
-        } catch (err) {
-          $fakeBtn.remove();
-          $status.css('color', '#cc0000').text('Error: ' + err.message);
-          $btn.prop('disabled', false).text('SEND ' + e.templateLabel);
+  function startScanAndPlan() {
+    injectStatusBar('Scanning...');
+    TWTools.DataFetcher.fetchWorldConfig(function() {
+      runScan(function() {
+        updateStatusBar('Building plan...');
+        buildPlan(function(s) { updateStatusBar(s); });
+        if (!farmPlan.length) {
+          updateStatusBar('No attacks planned. Check settings or scan again.');
+          setTimeout(removeStatusBar, 3000);
+          return;
         }
-      } else {
-        // Fallback: direct AJAX (when not on am_farm page)
-        var csrf = csrfToken || (typeof game_data !== 'undefined' ? game_data.csrf : '');
-        var url = sendUnitsLink
-          ? sendUnitsLink.replace(/village=\d+/, 'village=' + e.sourceId)
-          : '/game.php?village=' + e.sourceId +
-            '&screen=am_farm&mode=farm&ajaxaction=farm&json=1&h=' + encodeURIComponent(csrf);
-
-        $.ajax({
-          url: url,
-          type: 'POST',
-          data: { target: e.targetId, template_id: e.templateId, source: e.sourceId },
-          timeout: 10000,
-          success: function(response) {
-            if (response && response.error) {
-              var errMsg = Array.isArray(response.error) ? response.error[0] : String(response.error);
-              $status.css('color', '#cc0000').text('Failed: ' + errMsg);
-              $btn.prop('disabled', false).text('RETRY ' + e.templateLabel);
-            } else {
-              farmSentCount++;
-              farmClickIdx++;
-              $status.css('color', '#2e7d32').text('Sent! Advancing...');
-              setTimeout(function() { renderFarmClickUI($panel); }, 300);
-            }
-          },
-          error: function() {
-            $status.css('color', '#cc0000').text('Network error.');
-            $btn.prop('disabled', false).text('RETRY ' + e.templateLabel);
-          }
-        });
-      }
-    });
-
-    // Skip button
-    $panel.on('click.twfsend', '#' + ID_PREFIX + 'skip-btn', function() {
-      farmClickIdx++;
-      renderFarmClickUI($panel);
-    });
-
-    // Back/Cancel button
-    $panel.on('click.twfsend', '#' + ID_PREFIX + 'back-btn', function() {
-      farmClickIdx = 0;
-      farmSentCount = 0;
-      isFarming = false;
-      renderFarmTab($panel);
+        removeStatusBar();
+        injectFarmTable();
+      }, function(s) { updateStatusBar(s); });
     });
   }
 
-  /**
-   * Cancel an in-progress farming execution.
-   */
+  // ---- Status bar (temporary) ----
+  function injectStatusBar(text) {
+    removeStatusBar();
+    var $bar = $('<div id="twf-sbar" style="padding:8px 12px;margin-bottom:8px;background:#f0e0b0;' +
+      'border:1px solid #c0a060;border-radius:3px;font-size:11px;"><b>TW Farm:</b> <span id="twf-stxt">' + esc(text) + '</span></div>');
+    var $w = $('#am_widget_Farm');
+    $w.length ? $w.before($bar) : $('#contentContainer').prepend($bar);
+  }
+  function updateStatusBar(text) { var $t = $('#twf-stxt'); $t.length ? $t.html(esc(text)) : injectStatusBar(text); }
+  function removeStatusBar() { $('#twf-sbar').remove(); }
+
   // ============================================================
-  // UI — FARM TAB
+  // FARM TABLE — injected before #am_widget_Farm
   // ============================================================
 
-  /**
-   * Render the farm tab content.
-   * @param {jQuery} $panel - Tab panel jQuery element.
-   */
-  function renderFarmTab($panel) {
-    $panel.off('.twfbtn .twfscan .twfplan .twffarm');
-    $panel.empty();
+  function injectFarmTable() {
+    removeFarmTable();
+    isFarming = true; farmSentCount = 0; farmErrorCount = 0;
+    var total = farmPlan.length;
 
-    // Build group selector dropdown
-    var groupSelectHtml = '<label style="font-size:10px;margin-left:4px;">Group: ' +
-      '<select id="' + ID_PREFIX + 'group-id" style="font-size:10px;">';
-    for (var gi = 0; gi < availableGroups.length; gi++) {
-      groupSelectHtml += '<option value="' + availableGroups[gi].id + '"' +
-        (settings.groupId === availableGroups[gi].id ? ' selected' : '') + '>' +
-        escapeHtml(availableGroups[gi].name) + '</option>';
-    }
-    groupSelectHtml += '</select></label>';
+    var h = '<div id="twf-fc">' +
+      // Header
+      '<div style="padding:6px 10px;background:linear-gradient(to bottom,#dac48c,#c1a264);' +
+        'border:1px solid #804000;border-bottom:none;border-radius:3px 3px 0 0;' +
+        'display:flex;align-items:center;justify-content:space-between;">' +
+        '<span style="font-weight:bold;font-size:12px;">TW Farm v' + VERSION + '</span>' +
+        '<span id="twf-ptxt" style="font-size:11px;">0 / ' + total + ' sent</span>' +
+        '<button class="btn" id="twf-cancel">Cancel</button>' +
+      '</div>' +
+      // Progress bar
+      '<div style="height:6px;background:#e8d8a8;border-left:1px solid #804000;border-right:1px solid #804000;">' +
+        '<div id="twf-pbar" style="height:100%;width:0%;background:linear-gradient(to bottom,#6a9c2a,#4a7a1e);transition:width 0.3s;"></div>' +
+      '</div>' +
+      // Table
+      '<table class="vis" id="twf-tbl" style="width:100%;border:1px solid #804000;">' +
+      '<thead><tr>' +
+        '<th style="width:30px;">#</th><th>Source</th><th>Target</th>' +
+        '<th style="text-align:right;width:50px;">Dist</th>' +
+        '<th style="text-align:right;width:60px;">Travel</th>' +
+        '<th style="text-align:center;width:40px;">Send</th>' +
+      '</tr></thead><tbody id="twf-tbody">';
 
-    // Top toolbar
-    var html = '<div style="margin-bottom:6px;">' +
-      groupSelectHtml + ' ' +
-      '<button class="btn" id="' + ID_PREFIX + 'scan-btn" style="font-size:10px;font-weight:bold;">Scan</button> ' +
-      '<button class="btn" id="' + ID_PREFIX + 'plan-btn" style="font-size:10px;"' +
-        (sourceVillages.length === 0 ? ' disabled' : '') + '>Plan</button> ' +
-      '<button class="btn" id="' + ID_PREFIX + 'farm-btn" style="font-size:10px;font-weight:bold;color:#2e7d32;"' +
-        (farmPlan.length === 0 ? ' disabled' : '') + '>Farm (' + farmPlan.length + ')</button>' +
-      '</div>';
-
-    // Status line
-    html += '<div id="' + ID_PREFIX + 'status" style="margin-bottom:6px;font-size:10px;color:#7a6840;">' +
-      (sourceVillages.length > 0
-        ? 'Scanned: ' + sourceVillages.length + ' sources, ' + farmTargets.length + ' targets.'
-        : 'Click "Scan" to load villages and farm targets.') +
-    '</div>';
-
-    // Source villages table (if scanned)
-    if (sourceVillages.length > 0) {
-      html += '<div style="margin-bottom:8px;">' +
-        '<b style="font-size:10px;">Source Villages (' + sourceVillages.length + ')</b>' +
-        '<table class="vis" style="width:100%;table-layout:auto;margin-top:2px;">' +
-        '<thead><tr>' +
-          '<th style="font-size:10px;">Village</th>' +
-          '<th style="font-size:10px;text-align:right;">LC Available</th>' +
-          '<th style="font-size:10px;text-align:right;">Targets</th>' +
-          '<th style="font-size:10px;text-align:center;">Status</th>' +
-        '</tr></thead><tbody>';
-
-      for (var si = 0; si < sourceVillages.length; si++) {
-        var src = sourceVillages[si];
-        var rowClass = si % 2 === 0 ? 'row_a' : 'row_b';
-        var lcColor = src.lcAvailable >= 20 ? '#2e7d32' : (src.lcAvailable >= settings.minLC ? '#a06800' : '#cc0000');
-        html += '<tr class="' + rowClass + '">' +
-          '<td style="font-size:10px;">' + escapeHtml(src.name) + ' <span style="color:#7a6840;">(' + src.coords + ')</span></td>' +
-          '<td style="font-size:10px;text-align:right;color:' + lcColor + ';font-weight:bold;">' + formatNum(src.lcAvailable) + '</td>' +
-          '<td style="font-size:10px;text-align:right;">' + src.targetsInRange + '</td>' +
-          '<td style="font-size:10px;text-align:center;color:#7a6840;">' + escapeHtml(src.status) + '</td>' +
-        '</tr>';
-      }
-
-      html += '</tbody></table></div>';
+    for (var i = 0; i < total; i++) {
+      var pl = farmPlan[i], rc = i % 2 === 0 ? 'row_a' : 'row_b';
+      var ic = pl.templateLabel === 'B' ? 'farm_icon_b' : 'farm_icon_a';
+      h += '<tr class="' + rc + (i === 0 ? ' twf-act' : '') + '" id="twf-r-' + i + '" data-idx="' + i + '">' +
+        '<td style="text-align:center;color:#7a6840;">' + (i + 1) + '</td>' +
+        '<td>' + esc(pl.sourceName) + ' <span style="color:#7a6840;">(' + pl.sourceCoords + ')</span></td>' +
+        '<td>(' + pl.targetCoords + ')</td>' +
+        '<td style="text-align:right;">' + fmtDist(pl.distance) + '</td>' +
+        '<td style="text-align:right;">' + fmtTravel(pl.travelTimeMs) + '</td>' +
+        '<td style="text-align:center;">' +
+          '<a class="farm_icon ' + ic + ' twf-si" data-idx="' + i + '" ' +
+            'title="Send ' + pl.templateLabel + ': ' + pl.sourceCoords + ' -> ' + pl.targetCoords + '" ' +
+            'style="cursor:pointer;display:inline-block;"></a></td></tr>';
     }
 
-    // Farm plan preview (if planned)
-    if (farmPlan.length > 0) {
-      html += '<div style="margin-bottom:8px;">' +
-        '<b style="font-size:10px;">Farm Plan (' + farmPlan.length + ' attacks)</b>' +
-        '<div style="max-height:250px;overflow-y:auto;margin-top:2px;">' +
-        '<table class="vis" style="width:100%;table-layout:auto;">' +
-        '<thead><tr>' +
-          '<th style="font-size:10px;">Source</th>' +
-          '<th style="font-size:10px;">Target</th>' +
-          '<th style="font-size:10px;text-align:right;">Dist</th>' +
-          '<th style="font-size:10px;text-align:center;">Tmpl</th>' +
-          '<th style="font-size:10px;text-align:right;">Travel</th>' +
-          '<th style="font-size:10px;text-align:right;">Est. Arrival</th>' +
-        '</tr></thead><tbody>';
+    h += '</tbody></table>' +
+      '<div style="padding:4px 10px;background:#e8d8a8;border:1px solid #804000;border-top:none;' +
+        'border-radius:0 0 3px 3px;font-size:10px;color:#5a4a2a;">' +
+        '<span id="twf-sum">' + total + ' attacks planned. Click farm icon or press <b>Enter</b> to send.</span></div></div>';
 
-      for (var pi = 0; pi < farmPlan.length; pi++) {
-        var plan = farmPlan[pi];
-        var planRowClass = pi % 2 === 0 ? 'row_a' : 'row_b';
-        html += '<tr class="' + planRowClass + '">' +
-          '<td style="font-size:9px;">' + escapeHtml(plan.sourceName) + ' <span style="color:#7a6840;">(' + plan.sourceCoords + ')</span></td>' +
-          '<td style="font-size:9px;color:#7a6840;">(' + plan.targetCoords + ')</td>' +
-          '<td style="font-size:9px;text-align:right;">' + formatDist(plan.distance) + '</td>' +
-          '<td style="font-size:9px;text-align:center;font-weight:bold;">' + plan.templateLabel + '</td>' +
-          '<td style="font-size:9px;text-align:right;">' + formatTravelTime(plan.travelTimeMs) + '</td>' +
-          '<td style="font-size:9px;text-align:right;font-family:monospace;">' + plan.estArrival + '</td>' +
-        '</tr>';
-      }
+    var $w = $('#am_widget_Farm');
+    $w.length ? $w.before(h) : $('#contentContainer').prepend(h);
 
-      html += '</tbody></table></div></div>';
+    var $fc = $('#twf-fc');
+    if ($fc.length) $('html, body').animate({ scrollTop: $fc.offset().top - 10 }, 300);
 
-      // Summary
-      var totalLC = 0;
-      for (var pj = 0; pj < farmPlan.length; pj++) {
-        totalLC += settings.minLC;
-      }
-      var estLoot = farmPlan.length * settings.minLC * LC_CARRY;
-      html += '<div style="padding:4px;background:#f0e0b0;border:1px solid #c0a060;border-radius:2px;font-size:10px;margin-bottom:6px;">' +
-        '<b>Summary:</b> ' + farmPlan.length + ' attacks, ~' + formatNum(totalLC) + ' LC used, ~' + formatNum(estLoot) + ' max loot capacity' +
-      '</div>';
-    }
+    // Events
+    $('#twf-tbl').on('click', '.twf-si', function(e) { e.preventDefault(); sendEntry(parseInt($(this).attr('data-idx'), 10)); });
+    $('#twf-cancel').on('click', function() { finishFarming('Cancelled by user.'); });
+    bindEnterKey();
+    injectFarmCSS();
+  }
 
-    // Results area (hidden initially)
-    html += '<div id="' + ID_PREFIX + 'results" style="display:none;margin-top:6px;"></div>';
+  function injectFarmCSS() {
+    if ($('#twf-css').length) return;
+    $('<style id="twf-css">' +
+      '.twf-act{background:#d4e8b0 !important}.twf-act td{font-weight:bold}' +
+      '.twf-si{opacity:.9}.twf-si:hover{opacity:1;transform:scale(1.2)}.twf-sending{opacity:.5;pointer-events:none}' +
+    '</style>').appendTo('head');
+  }
 
-    $panel.html(html);
+  function removeFarmTable() { $('#twf-fc').remove(); unbindEnterKey(); }
 
-    // ---- Event Bindings ----
-
-    // Group change
-    $panel.on('change.twfbtn', '#' + ID_PREFIX + 'group-id', function() {
-      settings.groupId = $(this).val();
-      saveSettings();
-      // Reset data when group changes
-      sourceVillages = [];
-      farmTargets = [];
-      farmPlan = [];
-      renderFarmTab($panel);
+  // ---- Enter key ----
+  function bindEnterKey() {
+    if (enterKeyBound) return; enterKeyBound = true;
+    $(document).on('keydown.twfarm', function(e) {
+      if (e.which !== 13 || !isFarming) return;
+      var tag = (e.target.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+      e.preventDefault();
+      var $fr = $('#twf-tbody tr:first');
+      if ($fr.length) sendEntry(parseInt($fr.attr('data-idx'), 10));
     });
+  }
+  function unbindEnterKey() { if (!enterKeyBound) return; enterKeyBound = false; $(document).off('keydown.twfarm'); }
 
-    // Scan button
-    $panel.on('click.twfscan', '#' + ID_PREFIX + 'scan-btn', function() {
-      var $btn = $(this);
-      $btn.prop('disabled', true).text('Scanning...');
+  // ============================================================
+  // SEND FARM ENTRY
+  // ============================================================
 
-      // Also fetch world config for travel time accuracy
-      TWTools.DataFetcher.fetchWorldConfig(function() {
-        runScan(function() {
-          renderFarmTab($panel);
-        }, function(status) {
-          $panel.find('#' + ID_PREFIX + 'status').text(status);
-          if (card) card.setStatus(status);
-        });
+  function sendEntry(idx) {
+    if (idx < 0 || idx >= farmPlan.length) return;
+    var pl = farmPlan[idx], $r = $('#twf-r-' + idx);
+    if (!$r.length || $r.hasClass('twf-sending')) return;
+    $r.addClass('twf-sending');
+    $r.find('.twf-si').css('opacity', '0.3');
+
+    var url = sendUnitsLink;
+    if (!url) {
+      var csrf = csrfToken || (typeof game_data !== 'undefined' ? game_data.csrf : '');
+      url = '/game.php?village=' + pl.sourceId + '&screen=am_farm&ajaxaction=farm&json=1&h=' + encodeURIComponent(csrf);
+    }
+    url = url.replace(/village=\d+/, 'village=' + pl.sourceId);
+
+    var data = { target: pl.targetId, template_id: pl.templateId, source_village: pl.sourceId };
+
+    if (typeof TribalWars !== 'undefined' && typeof TribalWars.post === 'function') {
+      try {
+        TribalWars.post(url, null, data, function(resp) { onSendOk(idx, pl, resp); }, function() { onSendErr(idx, pl, 'Network error'); });
+      } catch (err) { onSendErr(idx, pl, err.message); }
+    } else {
+      $.ajax({ url: url, type: 'POST', data: data, dataType: 'json', timeout: 10000,
+        success: function(resp) { onSendOk(idx, pl, resp); },
+        error: function(x, s, e) { onSendErr(idx, pl, e || s || 'Network error'); }
       });
-    });
-
-    // Plan button
-    $panel.on('click.twfplan', '#' + ID_PREFIX + 'plan-btn', function() {
-      if (sourceVillages.length === 0) {
-        TWTools.UI.toast('Run scan first.', 'warning');
-        return;
-      }
-
-      buildPlan(function(status) {
-        $panel.find('#' + ID_PREFIX + 'status').text(status);
-        if (card) card.setStatus(status);
-      });
-
-      renderFarmTab($panel);
-    });
-
-    // Farm button — opens click-through UI
-    $panel.on('click.twffarm', '#' + ID_PREFIX + 'farm-btn', function() {
-      if (farmPlan.length === 0) {
-        TWTools.UI.toast('No attacks planned.', 'warning');
-        return;
-      }
-      // Start click-through mode
-      farmClickIdx = 0;
-      farmSentCount = 0;
-      isFarming = true;
-      renderFarmClickUI($panel);
-    });
-  }
-
-  // ============================================================
-  // UI — SETTINGS TAB
-  // ============================================================
-
-  /**
-   * Render the settings tab content.
-   * @param {jQuery} $panel - Tab panel jQuery element.
-   */
-  function renderSettingsTab($panel) {
-    $panel.off('.twfset');
-    $panel.empty();
-
-    // Build group selector
-    var groupSelectHtml = '<select id="' + ID_PREFIX + 'set-group" style="font-size:10px;width:150px;">';
-    for (var gi = 0; gi < availableGroups.length; gi++) {
-      groupSelectHtml += '<option value="' + availableGroups[gi].id + '"' +
-        (settings.groupId === availableGroups[gi].id ? ' selected' : '') + '>' +
-        escapeHtml(availableGroups[gi].name) + '</option>';
     }
-    groupSelectHtml += '</select>';
+  }
 
-    var html = '<div style="padding:4px;">' +
+  function onSendOk(idx, pl, resp) {
+    if (resp && resp.error) {
+      onSendErr(idx, pl, Array.isArray(resp.error) ? resp.error[0] : String(resp.error));
+      return;
+    }
+    farmSentCount++;
+    if (resp && resp.units) updateUnits(pl.sourceId, resp.units);
 
-      // Group
-      '<div style="margin-bottom:8px;">' +
-        '<label style="font-size:10px;">Village Group: ' + groupSelectHtml + '</label>' +
-        '<div style="font-size:9px;color:#7a6840;margin-top:2px;">Only farm from villages in this group.</div>' +
-      '</div>' +
+    if (typeof UI !== 'undefined' && typeof UI.SuccessMessage === 'function') {
+      UI.SuccessMessage('Farm: ' + pl.sourceCoords + ' -> ' + pl.targetCoords + ' (' + pl.templateLabel + ')');
+    }
+    markPlunderDone(pl.targetId);
 
-      // Max distance
-      '<div style="margin-bottom:8px;">' +
-        '<label style="font-size:10px;">Max Distance (fields): ' +
-        '<input type="number" id="' + ID_PREFIX + 'set-dist" value="' + settings.maxDistance +
-          '" style="width:50px;font-size:10px;" min="1" max="100" step="1">' +
-        '</label>' +
-        '<div style="font-size:9px;color:#7a6840;margin-top:2px;">Skip targets farther than this distance.</div>' +
-      '</div>' +
-
-      // Cooldown
-      '<div style="margin-bottom:8px;">' +
-        '<label style="font-size:10px;">Cooldown (minutes): ' +
-        '<input type="number" id="' + ID_PREFIX + 'set-cooldown" value="' + settings.cooldownMinutes +
-          '" style="width:50px;font-size:10px;" min="0" max="60" step="1">' +
-        '</label>' +
-        '<div style="font-size:9px;color:#7a6840;margin-top:2px;">Skip targets with existing attacks arriving within this window.</div>' +
-      '</div>' +
-
-      // Min LC
-      '<div style="margin-bottom:8px;">' +
-        '<label style="font-size:10px;">Min LC per village: ' +
-        '<input type="number" id="' + ID_PREFIX + 'set-minlc" value="' + settings.minLC +
-          '" style="width:50px;font-size:10px;" min="1" max="500" step="1">' +
-        '</label>' +
-        '<div style="font-size:9px;color:#7a6840;margin-top:2px;">Skip villages with fewer LC. Also used as LC-per-attack estimate.</div>' +
-      '</div>' +
-
-      // Use B template
-      '<div style="margin-bottom:8px;">' +
-        '<label style="font-size:10px;">' +
-        '<input type="checkbox" id="' + ID_PREFIX + 'set-useb"' +
-          (settings.useBForMaxLoot ? ' checked' : '') + '> ' +
-        'Use Template B when max loot' +
-        '</label>' +
-        '<div style="font-size:9px;color:#7a6840;margin-top:2px;">Send Template B (heavier) to targets that returned max loot.</div>' +
-      '</div>' +
-
-      // Include new barbs
-      '<div style="margin-bottom:8px;">' +
-        '<label style="font-size:10px;">' +
-        '<input type="checkbox" id="' + ID_PREFIX + 'set-barbs"' +
-          (settings.includeNewBarbs ? ' checked' : '') + '> ' +
-        'Include new barb villages' +
-        '</label>' +
-        '<div style="font-size:9px;color:#7a6840;margin-top:2px;">' +
-          'Discover barb villages from map data not yet on your Farm Assistant list. (Experimental)' +
-        '</div>' +
-      '</div>' +
-
-      // Save button
-      '<div style="margin-top:12px;">' +
-        '<button class="btn" id="' + ID_PREFIX + 'save-settings" style="font-weight:bold;">Save Settings</button> ' +
-        '<button class="btn" id="' + ID_PREFIX + 'clear-cache" style="font-size:9px;">Clear Cache</button>' +
-      '</div>' +
-
-      // Info box
-      '<div style="margin-top:12px;padding:4px;background:#f0e0b0;border:1px solid #c0a060;border-radius:2px;font-size:9px;color:#7a6840;">' +
-        'TW Farm v' + VERSION + '<br/>' +
-        'LC Speed: ' + LC_SPEED + ' min/field (base) | LC Carry: ' + LC_CARRY + ' per unit<br/>' +
-        'Farm data cached for 5 minutes. Use "Scan" to refresh.' +
-      '</div>' +
-
-    '</div>';
-
-    $panel.html(html);
-
-    // Bind save
-    $panel.on('click.twfset', '#' + ID_PREFIX + 'save-settings', function() {
-      settings.groupId = $panel.find('#' + ID_PREFIX + 'set-group').val();
-      settings.maxDistance = parseInt($panel.find('#' + ID_PREFIX + 'set-dist').val(), 10) || 20;
-      settings.cooldownMinutes = parseInt($panel.find('#' + ID_PREFIX + 'set-cooldown').val(), 10) || 5;
-      settings.minLC = parseInt($panel.find('#' + ID_PREFIX + 'set-minlc').val(), 10) || 5;
-      settings.useBForMaxLoot = $panel.find('#' + ID_PREFIX + 'set-useb').is(':checked');
-      settings.includeNewBarbs = $panel.find('#' + ID_PREFIX + 'set-barbs').is(':checked');
-      saveSettings();
-
-      // Update targets in range with new distance
-      updateTargetsInRange();
-
-      TWTools.UI.toast('Settings saved', 'success');
-    });
-
-    // Bind clear cache
-    $panel.on('click.twfset', '#' + ID_PREFIX + 'clear-cache', function() {
-      sourceVillages = [];
-      farmTargets = [];
-      outgoingAttacks = [];
-      farmPlan = [];
-      TWTools.UI.toast('Cache cleared', 'success');
+    var $r = $('#twf-r-' + idx);
+    $r.fadeOut(200, function() {
+      $r.remove();
+      hlFirst();
+      updateProgress();
+      if (!$('#twf-tbody tr').length) finishFarming('All done! Sent ' + farmSentCount + ' / ' + farmPlan.length + ' attacks.');
     });
   }
 
+  function onSendErr(idx, pl, msg) {
+    farmErrorCount++;
+    var $r = $('#twf-r-' + idx);
+    $r.removeClass('twf-sending').find('.twf-si').css('opacity', '1');
+    $r.css('background', '#f5c0c0');
+    setTimeout(function() { $r.css('background', ''); hlFirst(); }, 1500);
+    if (typeof UI !== 'undefined' && typeof UI.ErrorMessage === 'function') {
+      UI.ErrorMessage('Farm error (' + pl.targetCoords + '): ' + msg);
+    } else { TWTools.UI.toast('Error: ' + msg, 'error'); }
+    updateProgress();
+  }
+
+  function markPlunderDone(targetId) {
+    $('#plunder_list tr[id*="' + targetId + '"]').find('.farm_icon_a, .farm_icon_b').addClass('farm_icon_disabled done');
+  }
+
+  function updateUnits(srcId, units) {
+    for (var i = 0; i < sourceVillages.length; i++) {
+      if (sourceVillages[i].id === srcId && typeof units.light !== 'undefined') {
+        sourceVillages[i].lcAvailable = parseInt(units.light, 10) || 0; break;
+      }
+    }
+  }
+
+  function hlFirst() {
+    $('#twf-tbody tr').removeClass('twf-act');
+    $('#twf-tbody tr:first').addClass('twf-act');
+  }
+
+  function updateProgress() {
+    var total = farmPlan.length, rem = $('#twf-tbody tr').length;
+    var pct = total > 0 ? Math.round(((total - rem) / total) * 100) : 0;
+    $('#twf-pbar').css('width', pct + '%');
+    var txt = farmSentCount + ' / ' + total + ' sent';
+    if (farmErrorCount > 0) txt += ' (' + farmErrorCount + ' errors)';
+    $('#twf-ptxt').text(txt);
+  }
+
+  function finishFarming(msg) {
+    isFarming = false; unbindEnterKey();
+    var $fc = $('#twf-fc');
+    if ($fc.length) {
+      $fc.html('<div style="padding:10px;background:#f0e0b0;border:1px solid #804000;border-radius:3px;text-align:center;">' +
+        '<b>TW Farm Complete</b><br/><span style="font-size:11px;">' + esc(msg) + '</span><br/>' +
+        '<span style="font-size:10px;color:#7a6840;">Sent: ' + farmSentCount + ' | Errors: ' + farmErrorCount +
+        ' | Planned: ' + farmPlan.length + '</span><br/>' +
+        '<button class="btn" id="twf-dismiss" style="margin-top:8px;">Dismiss</button></div>');
+      $('#twf-dismiss').on('click', function() { removeFarmTable(); });
+      setTimeout(removeFarmTable, 10000);
+    }
+    TWTools.UI.toast(msg, 'success');
+  }
+
   // ============================================================
-  // MAIN CARD INITIALIZATION
+  // TOOLBAR BUTTON
   // ============================================================
 
-  /**
-   * Initialize the TW Farm card widget.
-   */
+  function injectToolbarButton() {
+    if ($('#twf-btn').length) return;
+    var $btn = $('<button class="btn" id="twf-btn" style="font-weight:bold;margin-left:10px;padding:2px 10px;">TW Farm</button>');
+
+    var $hdr = $('h3:contains("Farm"), h4:contains("Farm")').filter(function() {
+      return $(this).closest('#am_widget_Farm, .am_widget, #contentContainer').length > 0;
+    }).first();
+
+    if ($hdr.length) {
+      $hdr.append($btn);
+    } else {
+      var $w = $('#am_widget_Farm');
+      $w.length ? $('<div style="margin-bottom:6px;"></div>').append($btn).insertBefore($w)
+                : $('#contentContainer').prepend($('<div style="margin-bottom:6px;"></div>').append($btn));
+    }
+    $btn.on('click', function(e) { e.preventDefault(); showSettingsDialog(); });
+  }
+
+  // ============================================================
+  // PAGE CHECK + REDIRECT
+  // ============================================================
+
+  function ensureAmFarmPage() {
+    var screen = (typeof game_data !== 'undefined' && game_data.screen) || '';
+    if (screen === 'am_farm') return true;
+    TWTools.UI.toast('Redirecting to Farm Assistant...', 'warning');
+    window.location.href = '/game.php?village=' + TWTools.getVillageId() + '&screen=am_farm';
+    return false;
+  }
+
+  // ============================================================
+  // INIT + AUTO-START
+  // ============================================================
+
   function init() {
     loadSettings();
+    readAccountmanagerGlobals();
+    if (TWTools.TimeSync && typeof TWTools.TimeSync.init === 'function') TWTools.TimeSync.init();
 
-    // Fetch available village groups in background
     TWTools.DataFetcher.fetchGroups(function(groups) {
       availableGroups = groups;
-      // Validate saved group ID still exists
       var found = false;
-      for (var i = 0; i < groups.length; i++) {
-        if (groups[i].id === settings.groupId) { found = true; break; }
-      }
-      if (!found) {
-        settings.groupId = '0';
-        saveSettings();
-      }
-      // Re-render group dropdowns if card is showing
-      var $groupSelect = $('#' + ID_PREFIX + 'group-id');
-      if ($groupSelect.length > 0) {
-        $groupSelect.empty();
-        for (var j = 0; j < availableGroups.length; j++) {
-          $groupSelect.append(
-            $('<option/>').val(availableGroups[j].id).text(availableGroups[j].name)
-          );
-        }
-        $groupSelect.val(settings.groupId);
-      }
+      for (var i = 0; i < groups.length; i++) { if (groups[i].id === settings.groupId) { found = true; break; } }
+      if (!found) { settings.groupId = '0'; saveSettings(); }
     });
+    TWTools.DataFetcher.fetchWorldConfig(function() {});
 
-    // Pre-fetch world config for travel time calculations
-    TWTools.DataFetcher.fetchWorldConfig(function() {
-      // World config loaded — travel time calculations will be accurate
-    });
-
-    card = TWTools.UI.createCard({
-      id: ID_PREFIX + 'main',
-      title: 'TW Farm',
-      version: VERSION,
-      width: 680,
-      height: 520,
-      minWidth: 500,
-      minHeight: 300,
-      tabs: [
-        { id: 'farm', label: 'Farm' },
-        { id: 'settings', label: 'Settings' }
-      ],
-      onTabChange: function(tabId) {
-        if (tabId === 'farm') {
-          renderFarmTab(card.getTabContent('farm'));
-        } else if (tabId === 'settings') {
-          renderSettingsTab(card.getTabContent('settings'));
-        }
-      },
-      onClose: function() {
-        if (isFarming) {
-          cancelFarming();
-        }
-        card = null;
-        TWTools.UI.toast('TW Farm closed', 'success');
-      }
-    });
-
-    // Initial render — farm tab
-    renderFarmTab(card.getTabContent('farm'));
-
-    // Settings tab — render immediately for lazy access
-    renderSettingsTab(card.getTabContent('settings'));
+    injectToolbarButton();
+    TWTools.UI.toast('TW Farm v' + VERSION + ' loaded', 'success');
   }
 
-  // ============================================================
-  // AUTO-START
-  // ============================================================
-
   $(function() {
-    if (!TWTools.getPlayerId()) {
-      return; // Not logged in or not in game
-    }
-
-    // Best when opened on am_farm page (Accountmanager globals available)
-    // but works from any page via AJAX fallback
-    var currentScreen = (typeof game_data !== 'undefined' && game_data.screen) || '';
-    if (currentScreen !== 'am_farm') {
-      TWTools.UI.toast('Tip: Open on Farm Assistant page for best results', 'info');
-    }
-
+    if (!TWTools.getPlayerId()) return;
+    if (!ensureAmFarmPage()) return;
     init();
-    TWTools.UI.toast('TW Farm v' + VERSION + ' loaded', 'success');
   });
 
 })(window, jQuery);
