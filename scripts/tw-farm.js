@@ -679,6 +679,22 @@
       }
     }
 
+    // Fallback: extract template IDs from the am_farm page HTML
+    // The page contains A/B buttons with data-template or onclick containing template_id
+    if (realTemplateA === null) {
+      var htmlStr0 = typeof html === 'string' ? html : '';
+      // Pattern: farm_icon_a with onclick containing template_id=N
+      var tmplMatchA = htmlStr0.match(/farm_icon_a[^>]*data-template[_-]id\s*=\s*["']?(\d+)/);
+      if (!tmplMatchA) tmplMatchA = htmlStr0.match(/class="farm_icon farm_icon_a"[^>]*onclick="[^"]*template_id:\s*(\d+)/);
+      if (!tmplMatchA) tmplMatchA = htmlStr0.match(/template_id['"]\s*:\s*(\d+)/);
+      if (tmplMatchA) realTemplateA = parseInt(tmplMatchA[1], 10);
+    }
+    if (realTemplateB === null) {
+      var htmlStr0b = typeof html === 'string' ? html : '';
+      var tmplMatchB = htmlStr0b.match(/farm_icon_b[^>]*data-template[_-]id\s*=\s*["']?(\d+)/);
+      if (tmplMatchB) realTemplateB = parseInt(tmplMatchB[1], 10);
+    }
+
     // Try to get send_units_link from TW's global Accountmanager object (most reliable)
     if (typeof Accountmanager !== 'undefined' && Accountmanager.send_units_link) {
       sendLink = Accountmanager.send_units_link;
@@ -961,6 +977,12 @@
 
     if (farmTargets.length === 0) {
       if (statusCb) statusCb('No farm targets. Check Farm Assistant settings.');
+      return farmPlan;
+    }
+
+    if (realTemplateA === null) {
+      if (statusCb) statusCb('No Farm Assistant templates configured! Go to Farm Assistant and set up Template A/B first.');
+      TWTools.UI.toast('Farm Assistant templates not configured! Open Farm Assistant (am_farm) and set up Template A first.', 'error');
       return farmPlan;
     }
 
