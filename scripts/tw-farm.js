@@ -347,14 +347,9 @@
             page++;
             setTimeout(fetchPage, 200);
           } else {
-            // Filter to villages with LC >= minLC
-            var filtered = [];
-            for (var i = 0; i < allVillages.length; i++) {
-              if (allVillages[i].lcAvailable >= settings.minLC) {
-                filtered.push(allVillages[i]);
-              }
-            }
-            callback(filtered);
+            // Return ALL villages (don't filter by minLC here — show all in UI,
+            // only skip villages with 0 LC during planning)
+            callback(allVillages);
           }
         },
         error: function() {
@@ -922,8 +917,12 @@
         isScanning = false;
         // Count targets in range for each source
         updateTargetsInRange();
+        var totalLC = 0;
+        for (var si = 0; si < sourceVillages.length; si++) {
+          totalLC += sourceVillages[si].lcAvailable || 0;
+        }
         if (statusCb) {
-          statusCb('Scan complete: ' + sourceVillages.length + ' sources, ' +
+          statusCb('Scanned: ' + sourceVillages.length + ' villages (' + totalLC + ' LC available), ' +
             farmTargets.length + ' targets, ' + outgoingAttacks.length + ' outgoing attacks.');
         }
         callback();
