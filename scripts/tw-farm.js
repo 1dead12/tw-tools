@@ -635,22 +635,35 @@
     var url = sendUnitsLink;
     if (!url) {
       var csrf = csrfToken || (typeof game_data !== 'undefined' ? game_data.csrf : '');
-      url = '/game.php?village=' + pl.sourceId + '&screen=am_farm&ajaxaction=farm&json=1&h=' + encodeURIComponent(csrf);
+      url = '/game.php?village=' + pl.sourceId + '&screen=am_farm&mode=farm&ajaxaction=farm&json=1&h=' + encodeURIComponent(csrf);
     }
+    // Replace village= with source village ID (send_units_link has current page village)
     url = url.replace(/village=\d+/, 'village=' + pl.sourceId);
 
-    var data = { target: pl.targetId, template_id: pl.templateId, source_village: pl.sourceId };
+    // Farm Assistant POST uses: target, template_id, source (NOT source_village)
+    var data = { target: pl.targetId, template_id: pl.templateId, source: pl.sourceId };
 
-    if (typeof TribalWars !== 'undefined' && typeof TribalWars.post === 'function') {
-      try {
-        TribalWars.post(url, null, data, function(resp) { onSendOk(idx, pl, resp); }, function() { onSendErr(idx, pl, 'Network error'); });
-      } catch (err) { onSendErr(idx, pl, err.message); }
-    } else {
-      $.ajax({ url: url, type: 'POST', data: data, dataType: 'json', timeout: 10000,
-        success: function(resp) { onSendOk(idx, pl, resp); },
-        error: function(x, s, e) { onSendErr(idx, pl, e || s || 'Network error'); }
-      });
-    }
+    // Use plain $.ajax for reliability — TribalWars.post can fail on cross-village sends
+    // The h= CSRF token and json=1 in the URL handle authentication
+    $.ajax({
+      url: url,
+      type: 'POST',
+      data: data,
+      dataType: 'json',
+      timeout: 15000,
+      success: function(resp) { onSendOk(idx, pl, resp); },
+      error: function(xhr) {
+        // Try to parse response even on HTTP error (TW sometimes returns 200 with error JSON)
+        var respText = xhr && xhr.responseText;
+        if (respText) {
+          try {
+            var parsed = JSON.parse(respText);
+            if (parsed && !parsed.error) { onSendOk(idx, pl, parsed); return; }
+          } catch (e) {}
+        }
+        onSendErr(idx, pl, 'Network error');
+      }
+    });
   }
 
   function onSendOk(idx, pl, resp) {
