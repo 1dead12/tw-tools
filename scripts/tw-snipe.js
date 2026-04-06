@@ -1041,7 +1041,9 @@
 
   function parseTimeToMs(str) {
     if (window.TWTools && TWTools.parseTimeToMs) return TWTools.parseTimeToMs(str);
-    var parts = str.split(':');
+    // Support both HH:MM:SS:mmm and HH:MM:SS.mmm formats
+    var cleaned = str.replace(/[.]/g, ':');
+    var parts = cleaned.split(':');
     if (parts.length < 3) return NaN;
     var h = parseInt(parts[0], 10);
     var m = parseInt(parts[1], 10);
@@ -1087,7 +1089,7 @@
     for (var j = 0; j < items.length; j++) {
       var item = items[j];
       var v = item.village;
-      var sel = v.id === selectedId ? ' selected' : '';
+      var sel = String(v.id) === String(selectedId) ? ' selected' : '';
       var distLabel = targetCoords ? ' [' + item.dist.toFixed(1) + 'f]' : '';
       html += '<option value="' + v.id + '"' + sel + '>' +
         (v.name || 'Village') + ' (' + v.x + '|' + v.y + ')' + distLabel + '</option>';
@@ -1117,7 +1119,7 @@
   function findVillageById(villages, id) {
     if (!id) return null;
     for (var i = 0; i < villages.length; i++) {
-      if (villages[i].id === id) return villages[i];
+      if (String(villages[i].id) === String(id)) return villages[i];
     }
     return null;
   }
