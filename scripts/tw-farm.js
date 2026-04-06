@@ -1117,101 +1117,174 @@
   }
 
   // ============================================================
-  // EXECUTION — SEND FARM ATTACKS
+  // EXECUTION — CLICK-THROUGH SEND UI
   // ============================================================
 
+  /** @type {number} Current index in the farm plan click-through */
+  var farmClickIdx = 0;
+
+  /** @type {number} Number of successfully sent attacks this session */
+  var farmSentCount = 0;
+
   /**
-   * Execute the farm plan by sending attacks via Farm Assistant API.
-   * Uses a queue with REQUEST_DELAY between requests.
-   * @param {function(number, number)} progressCb - Called with (sent, total) after each request.
-   * @param {function(number, number)} doneCb - Called with (sent, failed) when complete.
+   * Render the click-through farming UI.
+   * Shows one target at a time with a big SEND button.
+   * User clicks SEND → attack is sent via Accountmanager.farm.sendUnits() → auto-advances to next.
+   * @param {jQuery} $panel - The tab content panel.
    */
-  function executePlan(progressCb, doneCb) {
-    if (farmPlan.length === 0) {
-      TWTools.UI.toast('No attacks in plan.', 'warning');
-      if (doneCb) doneCb(0, 0);
-      return;
-    }
-
-    isFarming = true;
-    farmCancelled = false;
-
-    var sent = 0;
-    var failed = 0;
-    var idx = 0;
+  function renderFarmClickUI($panel) {
     var total = farmPlan.length;
+    var entry = farmClickIdx < total ? farmPlan[farmClickIdx] : null;
 
-    // Ensure CSRF token
-    if (!csrfToken && typeof game_data !== 'undefined') {
-      csrfToken = game_data.csrf || '';
+    var html = '<div style="padding:6px;">';
+
+    // Progress header
+    html += '<div style="margin-bottom:8px;text-align:center;">' +
+      '<b style="font-size:12px;">' + (farmClickIdx + 1) + ' / ' + total + '</b>' +
+      ' <span style="font-size:10px;color:#7a6840;">(Sent: ' + farmSentCount + ')</span>' +
+      '</div>';
+
+    // Progress bar
+    var pct = total > 0 ? Math.round(((farmClickIdx) / total) * 100) : 0;
+    html += '<div style="margin-bottom:8px;background:#e8d8a8;border:1px solid #c0a060;border-radius:2px;height:12px;position:relative;">' +
+      '<div style="background:linear-gradient(to bottom,#6a9c2a,#4a7a1e);height:100%;width:' + pct + '%;border-radius:2px;transition:width 0.3s;"></div>' +
+    '</div>';
+
+    if (!entry) {
+      // All done
+      html += '<div style="text-align:center;padding:20px;">' +
+        '<b style="font-size:14px;color:#2e7d32;">All done!</b><br/>' +
+        '<span style="font-size:11px;">Sent: ' + farmSentCount + ' / ' + total + ' attacks</span><br/>' +
+        '<button class="btn" id="' + ID_PREFIX + 'back-btn" style="margin-top:10px;font-size:11px;">Back to Plan</button>' +
+      '</div>';
+    } else {
+      // Current target info
+      html += '<div style="background:#f0e0b0;border:1px solid #c0a060;border-radius:3px;padding:8px;margin-bottom:8px;">' +
+        '<table style="width:100%;font-size:11px;">' +
+        '<tr><td style="color:#7a6840;width:80px;">Source:</td><td><b>' + escapeHtml(entry.sourceName) + '</b> (' + entry.sourceCoords + ')</td></tr>' +
+        '<tr><td style="color:#7a6840;">Target:</td><td><b>(' + entry.targetCoords + ')</b></td></tr>' +
+        '<tr><td style="color:#7a6840;">Distance:</td><td>' + formatDist(entry.distance) + ' fields</td></tr>' +
+        '<tr><td style="color:#7a6840;">Template:</td><td><b style="font-size:14px;">' + entry.templateLabel + '</b>' +
+          ' (ID: ' + entry.templateId + ')</td></tr>' +
+        '<tr><td style="color:#7a6840;">Travel:</td><td>' + formatTravelTime(entry.travelTimeMs) + '</td></tr>' +
+        '<tr><td style="color:#7a6840;">Est. Arrival:</td><td style="font-family:monospace;">' + entry.estArrival + '</td></tr>' +
+        '</table>' +
+      '</div>';
+
+      // Big SEND button — same position every time for fast clicking
+      html += '<div style="text-align:center;margin-bottom:8px;">' +
+        '<button class="btn" id="' + ID_PREFIX + 'send-btn" ' +
+          'style="font-size:16px;font-weight:bold;padding:10px 40px;background:linear-gradient(to bottom,#6a9c2a,#4a7a1e);' +
+          'color:#fff;border:2px solid #3e5a10;border-radius:4px;cursor:pointer;min-width:200px;">' +
+          'SEND ' + entry.templateLabel +
+        '</button>' +
+      '</div>';
+
+      // Status line for feedback
+      html += '<div id="' + ID_PREFIX + 'send-status" style="text-align:center;font-size:10px;color:#7a6840;min-height:16px;"></div>';
+
+      // Skip / Back buttons
+      html += '<div style="text-align:center;margin-top:6px;">' +
+        '<button class="btn" id="' + ID_PREFIX + 'skip-btn" style="font-size:9px;margin-right:8px;">Skip &raquo;</button>' +
+        '<button class="btn" id="' + ID_PREFIX + 'back-btn" style="font-size:9px;">Cancel</button>' +
+      '</div>';
     }
 
-    function sendNext() {
-      if (farmCancelled) {
-        isFarming = false;
-        TWTools.UI.toast('Farming cancelled. Sent: ' + sent + ', Remaining: ' + (total - idx), 'warning');
-        if (doneCb) doneCb(sent, failed);
-        return;
-      }
+    html += '</div>';
+    $panel.html(html);
 
-      if (idx >= total) {
-        isFarming = false;
-        TWTools.UI.toast('Farming complete! Sent: ' + sent + ', Failed: ' + failed, 'success');
-        if (doneCb) doneCb(sent, failed);
-        return;
-      }
+    // ---- Event bindings ----
+    $panel.off('.twfsend');
 
-      var entry = farmPlan[idx];
-      idx++;
+    // SEND button — calls Accountmanager.farm.sendUnits if on am_farm, else AJAX
+    $panel.on('click.twfsend', '#' + ID_PREFIX + 'send-btn', function() {
+      var $btn = $(this);
+      if ($btn.prop('disabled')) return;
+      $btn.prop('disabled', true).text('Sending...');
 
-      // Send farm attack via the Farm Assistant endpoint.
-      // Real URL format from game: /game.php?village={source}&screen=am_farm&mode=farm&ajaxaction=farm&json=1&h={csrf}
-      // POST data: {target: villageId, template_id: templateId, source: sourceVillageId}
-      var csrf = csrfToken || (typeof game_data !== 'undefined' ? game_data.csrf : '');
-      var url = sendUnitsLink
-        ? sendUnitsLink.replace(/village=\d+/, 'village=' + entry.sourceId)
-        : '/game.php?village=' + entry.sourceId +
-          '&screen=am_farm&mode=farm&ajaxaction=farm&json=1&h=' + encodeURIComponent(csrf);
+      var e = farmPlan[farmClickIdx];
+      if (!e) return;
 
-      $.ajax({
-        url: url,
-        type: 'POST',
-        data: {
-          target: entry.targetId,
-          template_id: entry.templateId,
-          source: entry.sourceId
-        },
-        timeout: 10000,
-        success: function(response) {
-          // TW returns JSON: {success: "message"} or {error: ["message"]}
-          if (response && response.error) {
-            failed++;
-            var errMsg = Array.isArray(response.error) ? response.error[0] : String(response.error);
-            if (typeof console !== 'undefined') console.warn('[TW Farm] Attack failed: ' + errMsg);
-          } else {
-            sent++;
-          }
-          if (progressCb) progressCb(idx, total);
-          setTimeout(sendNext, getRequestDelay());
-        },
-        error: function(xhr) {
-          failed++;
-          if (progressCb) progressCb(idx, total);
-          setTimeout(sendNext, getRequestDelay());
+      var $status = $panel.find('#' + ID_PREFIX + 'send-status');
+      $status.text('Sending attack to (' + e.targetCoords + ')...');
+
+      // Use Accountmanager.farm.sendUnits if available (on am_farm page)
+      if (typeof Accountmanager !== 'undefined' && Accountmanager.farm &&
+          typeof Accountmanager.farm.sendUnits === 'function') {
+        // Create a fake button element for sendUnits (it reads classes from the element)
+        var $fakeBtn = $('<a class="farm_icon farm_icon_' + (e.templateLabel === 'A' ? 'a' : 'b') + '"></a>');
+        $fakeBtn.appendTo('body');
+
+        // sendUnits: function(element, targetId, templateId)
+        // It calls TribalWars.post internally and updates unit counts
+        try {
+          Accountmanager.farm.sendUnits($fakeBtn[0], e.targetId, e.templateId);
+          // sendUnits is async — wait a bit for the POST to complete
+          setTimeout(function() {
+            $fakeBtn.remove();
+            farmSentCount++;
+            farmClickIdx++;
+            $status.css('color', '#2e7d32').text('Sent! Advancing...');
+            setTimeout(function() {
+              renderFarmClickUI($panel);
+            }, 300);
+          }, 500);
+        } catch (err) {
+          $fakeBtn.remove();
+          $status.css('color', '#cc0000').text('Error: ' + err.message);
+          $btn.prop('disabled', false).text('SEND ' + e.templateLabel);
         }
-      });
-    }
+      } else {
+        // Fallback: direct AJAX (when not on am_farm page)
+        var csrf = csrfToken || (typeof game_data !== 'undefined' ? game_data.csrf : '');
+        var url = sendUnitsLink
+          ? sendUnitsLink.replace(/village=\d+/, 'village=' + e.sourceId)
+          : '/game.php?village=' + e.sourceId +
+            '&screen=am_farm&mode=farm&ajaxaction=farm&json=1&h=' + encodeURIComponent(csrf);
 
-    sendNext();
+        $.ajax({
+          url: url,
+          type: 'POST',
+          data: { target: e.targetId, template_id: e.templateId, source: e.sourceId },
+          timeout: 10000,
+          success: function(response) {
+            if (response && response.error) {
+              var errMsg = Array.isArray(response.error) ? response.error[0] : String(response.error);
+              $status.css('color', '#cc0000').text('Failed: ' + errMsg);
+              $btn.prop('disabled', false).text('RETRY ' + e.templateLabel);
+            } else {
+              farmSentCount++;
+              farmClickIdx++;
+              $status.css('color', '#2e7d32').text('Sent! Advancing...');
+              setTimeout(function() { renderFarmClickUI($panel); }, 300);
+            }
+          },
+          error: function() {
+            $status.css('color', '#cc0000').text('Network error.');
+            $btn.prop('disabled', false).text('RETRY ' + e.templateLabel);
+          }
+        });
+      }
+    });
+
+    // Skip button
+    $panel.on('click.twfsend', '#' + ID_PREFIX + 'skip-btn', function() {
+      farmClickIdx++;
+      renderFarmClickUI($panel);
+    });
+
+    // Back/Cancel button
+    $panel.on('click.twfsend', '#' + ID_PREFIX + 'back-btn', function() {
+      farmClickIdx = 0;
+      farmSentCount = 0;
+      isFarming = false;
+      renderFarmTab($panel);
+    });
   }
 
   /**
    * Cancel an in-progress farming execution.
    */
-  function cancelFarming() {
-    farmCancelled = true;
-  }
-
   // ============================================================
   // UI — FARM TAB
   // ============================================================
@@ -1241,19 +1314,8 @@
       '<button class="btn" id="' + ID_PREFIX + 'plan-btn" style="font-size:10px;"' +
         (sourceVillages.length === 0 ? ' disabled' : '') + '>Plan</button> ' +
       '<button class="btn" id="' + ID_PREFIX + 'farm-btn" style="font-size:10px;font-weight:bold;color:#2e7d32;"' +
-        (farmPlan.length === 0 ? ' disabled' : '') + '>Farm All (' + farmPlan.length + ')</button> ' +
-      '<button class="btn" id="' + ID_PREFIX + 'cancel-btn" style="font-size:10px;color:#cc0000;display:none;">Cancel</button>' +
+        (farmPlan.length === 0 ? ' disabled' : '') + '>Farm (' + farmPlan.length + ')</button>' +
       '</div>';
-
-    // Progress bar (hidden initially)
-    html += '<div id="' + ID_PREFIX + 'progress-wrap" style="display:none;margin-bottom:6px;">' +
-      '<div style="background:#e8d8a8;border:1px solid #c0a060;border-radius:2px;height:16px;position:relative;">' +
-        '<div id="' + ID_PREFIX + 'progress-bar" style="background:linear-gradient(to bottom,#6a9c2a,#4a7a1e);' +
-          'height:100%;width:0%;border-radius:2px;transition:width 0.2s;"></div>' +
-        '<span id="' + ID_PREFIX + 'progress-text" style="position:absolute;top:0;left:0;right:0;' +
-          'text-align:center;font-size:9px;line-height:16px;color:#3e2e14;">0 / 0</span>' +
-      '</div>' +
-    '</div>';
 
     // Status line
     html += '<div id="' + ID_PREFIX + 'status" style="margin-bottom:6px;font-size:10px;color:#7a6840;">' +
@@ -1379,65 +1441,17 @@
       renderFarmTab($panel);
     });
 
-    // Farm All button
+    // Farm button — opens click-through UI
     $panel.on('click.twffarm', '#' + ID_PREFIX + 'farm-btn', function() {
       if (farmPlan.length === 0) {
         TWTools.UI.toast('No attacks planned.', 'warning');
         return;
       }
-
-      if (isFarming) {
-        TWTools.UI.toast('Farming already in progress.', 'warning');
-        return;
-      }
-
-      // Show confirmation
-      var confirmMsg = 'Send ' + farmPlan.length + ' farm attacks?';
-      if (!window.confirm(confirmMsg)) return;
-
-      // Show progress bar and cancel button
-      $panel.find('#' + ID_PREFIX + 'progress-wrap').show();
-      $panel.find('#' + ID_PREFIX + 'cancel-btn').show();
-      $panel.find('#' + ID_PREFIX + 'farm-btn').prop('disabled', true);
-      $panel.find('#' + ID_PREFIX + 'scan-btn').prop('disabled', true);
-      $panel.find('#' + ID_PREFIX + 'plan-btn').prop('disabled', true);
-
-      executePlan(
-        // Progress callback
-        function(current, total) {
-          var pct = Math.round((current / total) * 100);
-          $panel.find('#' + ID_PREFIX + 'progress-bar').css('width', pct + '%');
-          $panel.find('#' + ID_PREFIX + 'progress-text').text(current + ' / ' + total);
-          if (card) card.setStatus('Farming: ' + current + '/' + total + ' (' + pct + '%)');
-        },
-        // Done callback
-        function(sent, failed) {
-          $panel.find('#' + ID_PREFIX + 'cancel-btn').hide();
-          $panel.find('#' + ID_PREFIX + 'scan-btn').prop('disabled', false);
-
-          // Show results
-          var resultHtml = '<div style="padding:6px;background:#f0e0b0;border:1px solid #c0a060;border-radius:2px;">' +
-            '<b>Farming Results</b><br/>' +
-            '<span style="color:#2e7d32;font-weight:bold;">Sent: ' + sent + '</span>';
-          if (failed > 0) {
-            resultHtml += ' &nbsp;|&nbsp; <span style="color:#cc0000;font-weight:bold;">Failed: ' + failed + '</span>';
-          }
-          resultHtml += '<br/><span style="font-size:9px;color:#7a6840;">Estimated max loot: ~' +
-            formatNum(sent * settings.minLC * LC_CARRY) + ' resources</span>' +
-          '</div>';
-          $panel.find('#' + ID_PREFIX + 'results').html(resultHtml).show();
-
-          // Reset plan
-          farmPlan = [];
-          if (card) card.setStatus('Done. Sent: ' + sent + ', Failed: ' + failed);
-        }
-      );
-    });
-
-    // Cancel button
-    $panel.on('click.twffarm', '#' + ID_PREFIX + 'cancel-btn', function() {
-      cancelFarming();
-      $(this).prop('disabled', true).text('Cancelling...');
+      // Start click-through mode
+      farmClickIdx = 0;
+      farmSentCount = 0;
+      isFarming = true;
+      renderFarmClickUI($panel);
     });
   }
 
