@@ -314,7 +314,8 @@
     if (statusCb) statusCb('Fetching source villages...');
 
     function fetchPage() {
-      var url = '/game.php?screen=overview_villages&mode=units&type=own_home' +
+      var villageId = TWTools.getVillageId();
+      var url = '/game.php?village=' + villageId + '&screen=overview_villages&mode=units&type=own_home' +
         groupParam + '&page=' + page;
 
       $.ajax({
@@ -471,7 +472,8 @@
     var page = 0;
 
     function fetchPage() {
-      var url = '/game.php?screen=overview_villages&mode=commands&type=attack&page=' + page;
+      var villageId = TWTools.getVillageId();
+      var url = '/game.php?village=' + villageId + '&screen=overview_villages&mode=commands&type=attack&page=' + page;
 
       $.ajax({
         url: url,
@@ -598,7 +600,8 @@
     var page = 0;
 
     function fetchPage() {
-      var url = '/game.php?screen=am_farm&Farm_page=' + page;
+      var villageId = TWTools.getVillageId();
+      var url = '/game.php?village=' + villageId + '&screen=am_farm&Farm_page=' + page;
 
       $.ajax({
         url: url,
@@ -667,9 +670,10 @@
     });
 
     // Extract real template IDs from Accountmanager.farm (the A/B buttons use these IDs)
-    if (typeof Accountmanager !== 'undefined' && Accountmanager.farm) {
-      var farmData = Accountmanager.farm;
-      if (farmData.templates) {
+    try {
+      if (typeof Accountmanager !== 'undefined' && Accountmanager.farm &&
+          Accountmanager.farm.templates) {
+        var farmData = Accountmanager.farm;
         if (farmData.templates.a && farmData.templates.a.id !== undefined) {
           realTemplateA = farmData.templates.a.id;
         }
@@ -677,6 +681,8 @@
           realTemplateB = farmData.templates.b.id;
         }
       }
+    } catch (e) {
+      // Accountmanager may not be fully initialized
     }
 
     // Fallback: extract template IDs from the am_farm page HTML
