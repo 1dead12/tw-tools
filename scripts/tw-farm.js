@@ -37,7 +37,20 @@
   var CACHE_TTL = 5 * 60 * 1000;
 
   /** Minimum delay between AJAX requests to avoid rate limiting */
-  var REQUEST_DELAY = 200;
+  /**
+   * Base delay between farm requests (ms).
+   * Randomized ±50% to mimic human behavior and avoid bot detection.
+   * TW's own Farm Assistant has ~200ms debounce, but humans click ~2-5s apart.
+   * We use 300-600ms base (faster than human but within the game's own scripting threshold).
+   * @type {number}
+   */
+  var REQUEST_DELAY_BASE = 400;
+
+  /** Get randomized delay to avoid bot-pattern detection */
+  function getRequestDelay() {
+    // Random delay between 250ms and 600ms
+    return REQUEST_DELAY_BASE + Math.floor(Math.random() * 300) - 100;
+  }
 
   /** LC speed in minutes per field (base, before world/unit speed modifiers) */
   var LC_SPEED = 10;
@@ -332,7 +345,7 @@
 
           if (result.hasNextPage) {
             page++;
-            setTimeout(fetchPage, REQUEST_DELAY);
+            setTimeout(fetchPage, 200);
           } else {
             // Filter to villages with LC >= minLC
             var filtered = [];
@@ -485,7 +498,7 @@
 
           if (result.hasNextPage) {
             page++;
-            setTimeout(fetchPage, REQUEST_DELAY);
+            setTimeout(fetchPage, 200);
           } else {
             callback(attacks);
           }
@@ -623,7 +636,7 @@
 
           if (result.hasNextPage) {
             page++;
-            setTimeout(fetchPage, REQUEST_DELAY);
+            setTimeout(fetchPage, 200);
           } else {
             callback(targets);
           }
@@ -1167,15 +1180,21 @@
         },
         timeout: 10000,
         success: function(response) {
-          // TW returns HTML or JSON — any 200 response means the attack was queued
-          sent++;
+          // TW returns JSON: {success: "message"} or {error: ["message"]}
+          if (response && response.error) {
+            failed++;
+            var errMsg = Array.isArray(response.error) ? response.error[0] : String(response.error);
+            if (typeof console !== 'undefined') console.warn('[TW Farm] Attack failed: ' + errMsg);
+          } else {
+            sent++;
+          }
           if (progressCb) progressCb(idx, total);
-          setTimeout(sendNext, REQUEST_DELAY);
+          setTimeout(sendNext, getRequestDelay());
         },
         error: function(xhr) {
           failed++;
           if (progressCb) progressCb(idx, total);
-          setTimeout(sendNext, REQUEST_DELAY);
+          setTimeout(sendNext, getRequestDelay());
         }
       });
     }
