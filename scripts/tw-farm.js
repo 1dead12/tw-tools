@@ -1118,56 +1118,34 @@
       var entry = farmPlan[idx];
       idx++;
 
-      // Use TW's native TribalWars.post() with Accountmanager.send_units_link
-      // This is the same method the Farm Assistant A/B buttons use.
-      // The send_units_link is a game variable like "/game.php?village=XXX&screen=am_farm&ajaxaction=farm"
-      // We replace the village= param with the source village ID.
-      var url = '';
-      if (sendUnitsLink) {
-        url = sendUnitsLink.replace(/village=\d+/, 'village=' + entry.sourceId);
-      } else {
-        // Fallback: construct URL manually
-        url = '/game.php?village=' + entry.sourceId +
-          '&screen=am_farm&ajaxaction=farm';
-      }
+      // Send farm attack via the Farm Assistant endpoint.
+      // URL format: /game.php?village={source}&screen=am_farm&ajaxaction=farm&h={csrf}
+      // POST data: {target: villageId, template_id: templateId, source: sourceVillageId}
+      var csrf = csrfToken || (typeof game_data !== 'undefined' ? game_data.csrf : '');
+      var url = '/game.php?village=' + entry.sourceId +
+        '&screen=am_farm&ajaxaction=farm&h=' + encodeURIComponent(csrf);
 
-      var postData = {
-        target: entry.targetId,
-        template_id: entry.templateId,
-        source: entry.sourceId
-      };
-
-      // Use TribalWars.post if available (handles CSRF + response parsing)
-      if (typeof TribalWars !== 'undefined' && typeof TribalWars.post === 'function') {
-        TribalWars.post(url, null, postData, function() {
+      $.ajax({
+        url: url,
+        type: 'POST',
+        data: {
+          target: entry.targetId,
+          template_id: entry.templateId,
+          source: entry.sourceId
+        },
+        timeout: 10000,
+        success: function(response) {
+          // TW returns HTML or JSON — any 200 response means the attack was queued
           sent++;
           if (progressCb) progressCb(idx, total);
           setTimeout(sendNext, REQUEST_DELAY);
-        }, function() {
+        },
+        error: function(xhr) {
           failed++;
           if (progressCb) progressCb(idx, total);
           setTimeout(sendNext, REQUEST_DELAY);
-        });
-      } else {
-        // Fallback: plain AJAX with CSRF in URL
-        $.ajax({
-          url: url + '&h=' + encodeURIComponent(csrfToken),
-          type: 'POST',
-          data: postData,
-          dataType: 'json',
-          timeout: 10000,
-          success: function() {
-            sent++;
-            if (progressCb) progressCb(idx, total);
-            setTimeout(sendNext, REQUEST_DELAY);
-          },
-          error: function() {
-            failed++;
-            if (progressCb) progressCb(idx, total);
-            setTimeout(sendNext, REQUEST_DELAY);
-          }
-        });
-      }
+        }
+      });
     }
 
     sendNext();
