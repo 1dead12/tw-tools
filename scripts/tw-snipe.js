@@ -685,6 +685,7 @@
     coordMode: 'A',
     coordTarget: '',
     // Noble tab
+    nobleMode: 'attack',
     nobleTarget: '',
     nobleSourceId: null,
     nobleArrival: '',
@@ -692,6 +693,13 @@
     nobleGap: 200,
     nobleIncludeNuke: true,
     noblePlan: null,
+    // Noble tab — defend mode
+    defendUnit: 'heavy',
+    defendTarget: '',
+    defendArrival: '',
+    defendWaves: 4,
+    defendGap: 200,
+    defendPlan: null,
     // Tools tab
     toolCalcFrom: '',
     toolCalcTo: '',
@@ -731,12 +739,18 @@
         coordMode: this.coordMode,
         returnManualUnit: this.returnManualUnit,
         returnMyVillageId: this.returnMyVillageId,
+        nobleMode: this.nobleMode,
         nobleTarget: this.nobleTarget,
         nobleSourceId: this.nobleSourceId,
         nobleArrival: this.nobleArrival,
         nobleCount: this.nobleCount,
         nobleGap: this.nobleGap,
-        nobleIncludeNuke: this.nobleIncludeNuke
+        nobleIncludeNuke: this.nobleIncludeNuke,
+        defendUnit: this.defendUnit,
+        defendTarget: this.defendTarget,
+        defendArrival: this.defendArrival,
+        defendWaves: this.defendWaves,
+        defendGap: this.defendGap
       });
     },
 
@@ -757,12 +771,18 @@
         this.coordMode = saved.coordMode || 'A';
         this.returnManualUnit = saved.returnManualUnit || 'light';
         this.returnMyVillageId = saved.returnMyVillageId || null;
+        this.nobleMode = saved.nobleMode || 'attack';
         this.nobleTarget = saved.nobleTarget || '';
         this.nobleSourceId = saved.nobleSourceId || null;
         this.nobleArrival = saved.nobleArrival || '';
         this.nobleCount = saved.nobleCount !== undefined ? saved.nobleCount : 4;
         this.nobleGap = saved.nobleGap !== undefined ? saved.nobleGap : 200;
         this.nobleIncludeNuke = saved.nobleIncludeNuke !== undefined ? saved.nobleIncludeNuke : true;
+        this.defendUnit = saved.defendUnit || 'heavy';
+        this.defendTarget = saved.defendTarget || '';
+        this.defendArrival = saved.defendArrival || '';
+        this.defendWaves = saved.defendWaves !== undefined ? saved.defendWaves : 4;
+        this.defendGap = saved.defendGap !== undefined ? saved.defendGap : 200;
       }
     },
 
@@ -2588,13 +2608,37 @@
     // ============================================================
     renderNobleTab: function() {
       var html = '';
-      html += this._renderNobleInputs();
-      if (State.noblePlan) {
-        html += this._renderNoblePlanTable();
+      html += this._renderNobleModeToggle();
+      if (State.nobleMode === 'attack') {
+        html += this._renderNobleInputs();
+        if (State.noblePlan) {
+          html += this._renderNoblePlanTable();
+        }
+      } else {
+        html += this._renderDefendInputs();
+        if (State.defendPlan) {
+          html += this._renderDefendPlanTable();
+        }
       }
       $el('tab-noble').html(html);
       this._bindNobleEvents();
-      this._startNobleCountdown();
+      if (State.nobleMode === 'attack') {
+        this._startNobleCountdown();
+      } else {
+        this._startDefendCountdown();
+      }
+    },
+
+    _renderNobleModeToggle: function() {
+      var atkActive = State.nobleMode === 'attack' ? ' active' : '';
+      var defActive = State.nobleMode === 'defend' ? ' active' : '';
+      var html = '<div class="tws-section">';
+      html += '<div class="tws-section-title">Noble Train Mode</div>';
+      html += '<div class="tws-flex">';
+      html += '<button class="tws-btn-mode tws-noble-mode-btn' + atkActive + '" data-noble-mode="attack">\u2694\uFE0F Attack</button>';
+      html += '<button class="tws-btn-mode tws-noble-mode-btn' + defActive + '" data-noble-mode="defend">\uD83D\uDEE1\uFE0F Defend / Support Snipe</button>';
+      html += '</div></div>';
+      return html;
     },
 
     _renderNobleInputs: function() {
@@ -2772,6 +2816,269 @@
       return html;
     },
 
+    // ----------------------------------------------------------
+    // DEFEND / SUPPORT SNIPE sub-mode
+    // ----------------------------------------------------------
+    _renderDefendInputs: function() {
+      var html = '<div class="tws-section">';
+      html += '<div class="tws-section-title">Support Snipe Planner</div>';
+      html += '<div class="tws-info">Time a support to land <b>between</b> enemy noble waves, destroying each noble one at a time.</div>';
+
+      // Row 1: Target + Unit type
+      html += '<div class="tws-grid-2" style="margin-bottom:6px">';
+      html += '<div><span class="tws-label">Target Village (ally being attacked)</span>';
+      html += '<input class="tws-input tws-input-coords" id="' + ID_PREFIX + 'defend-target" placeholder="408|510" value="' + State.defendTarget + '"></div>';
+      html += '<div><span class="tws-label">Support Unit Type</span>';
+      html += '<select class="tws-select" id="' + ID_PREFIX + 'defend-unit" style="width:100%">' + buildUnitOptions(State.defendUnit) + '</select></div>';
+      html += '</div>';
+
+      // Row 2: Noble arrival + Waves
+      html += '<div class="tws-grid-2" style="margin-bottom:6px">';
+      html += '<div><span class="tws-label">Noble Train First Arrival (HH:MM:SS.mmm)</span>';
+      html += '<input class="tws-input tws-input-time" id="' + ID_PREFIX + 'defend-arrival" placeholder="10:30:00:000" value="' + State.defendArrival + '"></div>';
+      html += '<div><span class="tws-label">Number of Waves (nobles)</span>';
+      html += '<select class="tws-select" id="' + ID_PREFIX + 'defend-waves">';
+      for (var i = 1; i <= 4; i++) {
+        var sel = i === State.defendWaves ? ' selected' : '';
+        html += '<option value="' + i + '"' + sel + '>' + i + '</option>';
+      }
+      html += '</select></div>';
+      html += '</div>';
+
+      // Row 3: Gap
+      html += '<div class="tws-grid-2" style="margin-bottom:6px">';
+      html += '<div><span class="tws-label">Gap Between Nobles (ms)</span>';
+      html += '<input class="tws-input" id="' + ID_PREFIX + 'defend-gap" type="number" min="50" max="2000" step="50" value="' + State.defendGap + '"></div>';
+      html += '<div></div>';
+      html += '</div>';
+
+      // World speed info
+      var ws = Data.getWorldSpeed();
+      var usf = Data.getUnitSpeedFactor();
+      html += '<div style="font-size:10px;color:' + COLORS.textDim + ';margin-bottom:8px">World speed: ' + ws + 'x | Unit speed factor: ' + usf + 'x</div>';
+
+      // Calculate button
+      html += '<button class="tws-btn" id="' + ID_PREFIX + 'defend-calc" style="width:100%">Calculate Support Snipe</button>';
+      html += '</div>';
+      return html;
+    },
+
+    _calcDefendPlan: function() {
+      var target = parseCoords(State.defendTarget);
+      var arrivalMs = parseTimeToMs(State.defendArrival);
+      var waves = State.defendWaves;
+      var gap = State.defendGap;
+      var unitType = State.defendUnit;
+
+      if (!target) return { error: 'Invalid target coordinates.' };
+      if (isNaN(arrivalMs)) return { error: 'Invalid arrival time. Use HH:MM:SS or HH:MM:SS:mmm format.' };
+      if (waves < 1) return { error: 'Need at least 1 wave.' };
+
+      // Calculate snipe windows between each pair of consecutive nobles
+      var nobleArrivals = [];
+      for (var n = 0; n < waves; n++) {
+        nobleArrivals.push(arrivalMs + (n * gap));
+      }
+
+      // For each gap between nobles, find the snipe window
+      var windows = [];
+      for (var w = 0; w < nobleArrivals.length - 1; w++) {
+        var winStart = nobleArrivals[w] + 1;
+        var winEnd = nobleArrivals[w + 1] - 1;
+        var winTarget = Math.floor((winStart + winEnd) / 2);
+        windows.push({
+          afterNoble: w + 1,
+          beforeNoble: w + 2,
+          startMs: winStart,
+          endMs: winEnd,
+          targetMs: winTarget,
+          widthMs: winEnd - winStart
+        });
+      }
+
+      // Use the first window (between noble 1 and noble 2) as primary snipe target
+      if (windows.length === 0) {
+        return { error: 'Need at least 2 noble waves to create a snipe window.' };
+      }
+      var primaryWindow = windows[0];
+
+      var unitSpeed = Data.getUnitSpeed(unitType);
+      var worldSpeed = Data.getWorldSpeed();
+      var unitSpeedFactor = Data.getUnitSpeedFactor();
+
+      var entries = [];
+      for (var i = 0; i < State.playerVillages.length; i++) {
+        var v = State.playerVillages[i];
+        var dist = Data.distance(v, target);
+        var travelMs = Math.round((dist * unitSpeed * 60000) / (worldSpeed * unitSpeedFactor));
+        var sendTimeMs = primaryWindow.targetMs - travelMs;
+        // Wrap around midnight
+        if (sendTimeMs < 0) sendTimeMs += 86400000;
+        var actualArrivalMs = (sendTimeMs + travelMs) % 86400000;
+        // Check if the support actually lands inside the snipe window
+        var canSnipe = sendTimeMs > 0 && sendTimeMs < 86400000;
+
+        entries.push({
+          villageName: v.name || 'Village',
+          villageCoords: v.x + '|' + v.y,
+          villageId: v.id,
+          distance: dist,
+          travelMs: travelMs,
+          travelFormatted: formatTimeSec(travelMs),
+          sendTimeMs: sendTimeMs,
+          sendTimeFormatted: formatTime(sendTimeMs),
+          arrivalMs: actualArrivalMs,
+          arrivalFormatted: formatTime(actualArrivalMs),
+          canSnipe: canSnipe
+        });
+      }
+
+      // Sort by distance
+      entries.sort(function(a, b) { return a.distance - b.distance; });
+
+      return {
+        entries: entries,
+        windows: windows,
+        nobleArrivals: nobleArrivals,
+        primaryWindow: primaryWindow,
+        unitType: unitType,
+        target: target,
+        targetCoords: State.defendTarget
+      };
+    },
+
+    _renderDefendPlanTable: function() {
+      var plan = State.defendPlan;
+      if (plan.error) {
+        return '<div class="tws-section"><div class="tws-warn">' + plan.error + '</div></div>';
+      }
+
+      var entries = plan.entries;
+      var pw = plan.primaryWindow;
+      var now = TimeSync.now();
+      var canSnipeCount = 0;
+      for (var c = 0; c < entries.length; c++) {
+        if (entries[c].canSnipe) canSnipeCount++;
+      }
+
+      var html = '<div class="tws-section">';
+      html += '<div class="tws-section-title">Support Snipe \u2014 ' + canSnipeCount + ' village' + (canSnipeCount !== 1 ? 's' : '') + ' can snipe</div>';
+
+      // Snipe window info
+      html += '<div class="tws-info">';
+      html += '<b>Noble 1</b> arrives ' + formatTime(plan.nobleArrivals[0]);
+      if (plan.nobleArrivals.length > 1) {
+        html += ' \u2192 <b>Noble 2</b> arrives ' + formatTime(plan.nobleArrivals[1]);
+      }
+      html += '<br>Snipe window: <b>' + pw.widthMs + 'ms</b> | Target arrival: <b>' + formatTime(pw.targetMs) + '</b>';
+      if (plan.windows.length > 1) {
+        html += '<br>' + plan.windows.length + ' windows available between ' + plan.nobleArrivals.length + ' nobles';
+      }
+      html += '</div>';
+
+      // Table
+      html += '<table class="tws-table" style="margin-top:6px"><thead><tr>';
+      html += '<th>Village</th><th>Dist</th><th>Travel</th><th>Send Time</th>';
+      html += '<th>Support Arrives</th><th>Countdown</th><th>GO</th>';
+      html += '</tr></thead><tbody>';
+
+      for (var j = 0; j < entries.length; j++) {
+        var e = entries[j];
+        var remaining = e.sendTimeMs - now;
+        if (remaining < -43200000) remaining += 86400000;
+        var rowStyle = '';
+        if (!e.canSnipe) {
+          rowStyle = 'opacity:0.4';
+        }
+
+        html += '<tr style="' + rowStyle + '">';
+        html += '<td style="font-size:11px">' + e.villageName + ' (' + e.villageCoords + ')</td>';
+        html += '<td class="tws-mono">' + e.distance.toFixed(2) + '</td>';
+        html += '<td class="tws-mono">' + e.travelFormatted + '</td>';
+        html += '<td class="tws-mono" style="font-weight:bold;color:' + (e.canSnipe ? COLORS.accent : COLORS.textDim) + '">' + e.sendTimeFormatted + '</td>';
+        html += '<td class="tws-mono" style="color:' + (e.canSnipe ? COLORS.success : COLORS.textDim) + '">' + e.arrivalFormatted + '</td>';
+        html += '<td class="tws-mono tws-countdown-live tws-defend-cd" data-target="' + e.sendTimeMs + '" data-idx="' + j + '">' + formatDuration(remaining) + '</td>';
+        html += '<td>';
+        if (e.canSnipe) {
+          html += '<button class="tws-btn tws-btn-sm tws-defend-go" data-village-id="' + e.villageId + '" data-target-x="' + plan.target.x + '" data-target-y="' + plan.target.y + '">GO</button>';
+        } else {
+          html += '<span style="color:' + COLORS.textDim + ';font-size:10px">too far</span>';
+        }
+        html += '</td>';
+        html += '</tr>';
+      }
+
+      html += '</tbody></table></div>';
+      return html;
+    },
+
+    _startDefendCountdown: function() {
+      if (this._defendInterval) clearInterval(this._defendInterval);
+      if (!State.defendPlan || State.defendPlan.error) return;
+
+      var self = this;
+      var beeped = {};
+      this._defendInterval = setInterval(function() {
+        if (State.activeTab !== 'noble' || State.nobleMode !== 'defend') {
+          clearInterval(self._defendInterval);
+          self._defendInterval = null;
+          return;
+        }
+
+        var now = TimeSync.now();
+        var entries = State.defendPlan.entries;
+        var nextIdx = -1;
+
+        for (var i = 0; i < entries.length; i++) {
+          if (!entries[i].canSnipe) continue;
+          var rem = entries[i].sendTimeMs - now;
+          if (rem < -43200000) rem += 86400000;
+          if (rem > 0 && nextIdx === -1) nextIdx = i;
+        }
+
+        $('.tws-defend-cd').each(function() {
+          var target = parseFloat($(this).data('target'));
+          var idx = parseInt($(this).data('idx'), 10);
+          var remaining = target - now;
+          if (remaining < -43200000) remaining += 86400000;
+          $(this).text(formatDuration(remaining));
+
+          // Color coding
+          if (remaining < 0) $(this).css('color', COLORS.textDim);
+          else if (remaining < 5000) $(this).css({ color: COLORS.danger, fontWeight: 'bold' });
+          else if (remaining < 30000) $(this).css('color', COLORS.warning);
+          else $(this).css('color', COLORS.success);
+
+          // Flash the row when within 3 seconds
+          var row = $(this).closest('tr');
+          if (remaining > 0 && remaining < 3000) {
+            var flash = Math.floor(Date.now() / 300) % 2 === 0;
+            row.css('background', flash ? COLORS.windowDanger : COLORS.windowSafe);
+          } else if (remaining <= 0 && remaining > -2000) {
+            row.css('background', COLORS.windowDanger);
+          }
+
+          // Beep when countdown reaches 0
+          if (remaining <= 0 && remaining > -1000 && !beeped[idx]) {
+            beeped[idx] = true;
+            self._nobleBeep();
+          }
+        });
+
+        // Highlight next action row
+        $el('tab-noble').find('.tws-defend-cd').each(function() {
+          var idx = parseInt($(this).data('idx'), 10);
+          if (idx === nextIdx) {
+            var row = $(this).closest('tr');
+            var existing = row.css('background');
+            if (!existing || existing.indexOf('rgba') === -1) {
+              row.css('background', COLORS.windowSafe);
+            }
+          }
+        });
+      }, 50);
+    },
+
     _startNobleCountdown: function() {
       if (this._nobleInterval) clearInterval(this._nobleInterval);
       if (!State.noblePlan || State.noblePlan.error) return;
@@ -2872,53 +3179,93 @@
     _bindNobleEvents: function() {
       var self = this;
 
-      $el('noble-calc').on('click', function() {
-        // Save inputs
-        State.nobleTarget = $el('noble-target').val();
-        State.nobleSourceId = $el('noble-source').val() || null;
-        State.nobleArrival = $el('noble-arrival').val();
-        State.nobleCount = parseInt($el('noble-count').val(), 10) || 4;
-        State.nobleGap = parseInt($el('noble-gap').val(), 10) || 200;
-        State.nobleIncludeNuke = $el('noble-nuke').is(':checked');
-        State.save();
-
-        // Calculate
-        State.noblePlan = self._calcNoblePlan();
-        self.renderNobleTab();
-      });
-
-      // Re-sort source dropdown when target changes
-      $el('noble-target').on('change', function() {
-        State.nobleTarget = $(this).val();
-        State.save();
-        self.renderNobleTab();
-      });
-
-      $el('noble-source').on('change', function() {
-        State.nobleSourceId = $(this).val() || null;
-        State.save();
-      });
-
-      // Copy BBCode
-      $el('tab-noble').on('click', '#' + ID_PREFIX + 'noble-copy-bb', function() {
-        var bb = self._buildNobleBBCode();
-        if (navigator.clipboard) {
-          navigator.clipboard.writeText(bb).then(function() {
-            $(this).text('Copied!');
-            setTimeout(function() { self.renderNobleTab(); }, 1500);
-          }.bind(this));
-        } else {
-          // Fallback: textarea trick
-          var ta = document.createElement('textarea');
-          ta.value = bb;
-          document.body.appendChild(ta);
-          ta.select();
-          document.execCommand('copy');
-          document.body.removeChild(ta);
-          $(this).text('Copied!');
-          setTimeout(function() { self.renderNobleTab(); }, 1500);
+      // Mode toggle
+      $el('tab-noble').on('click', '.tws-noble-mode-btn', function() {
+        var mode = $(this).data('noble-mode');
+        if (mode && mode !== State.nobleMode) {
+          State.nobleMode = mode;
+          State.save();
+          self.renderNobleTab();
         }
       });
+
+      if (State.nobleMode === 'attack') {
+        // --- ATTACK mode bindings ---
+        $el('noble-calc').on('click', function() {
+          State.nobleTarget = $el('noble-target').val();
+          State.nobleSourceId = $el('noble-source').val() || null;
+          State.nobleArrival = $el('noble-arrival').val();
+          State.nobleCount = parseInt($el('noble-count').val(), 10) || 4;
+          State.nobleGap = parseInt($el('noble-gap').val(), 10) || 200;
+          State.nobleIncludeNuke = $el('noble-nuke').is(':checked');
+          State.save();
+
+          State.noblePlan = self._calcNoblePlan();
+          self.renderNobleTab();
+        });
+
+        $el('noble-target').on('change', function() {
+          State.nobleTarget = $(this).val();
+          State.save();
+          self.renderNobleTab();
+        });
+
+        $el('noble-source').on('change', function() {
+          State.nobleSourceId = $(this).val() || null;
+          State.save();
+        });
+
+        // Copy BBCode
+        $el('tab-noble').on('click', '#' + ID_PREFIX + 'noble-copy-bb', function() {
+          var bb = self._buildNobleBBCode();
+          if (navigator.clipboard) {
+            navigator.clipboard.writeText(bb).then(function() {
+              $(this).text('Copied!');
+              setTimeout(function() { self.renderNobleTab(); }, 1500);
+            }.bind(this));
+          } else {
+            var ta = document.createElement('textarea');
+            ta.value = bb;
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+            $(this).text('Copied!');
+            setTimeout(function() { self.renderNobleTab(); }, 1500);
+          }
+        });
+      } else {
+        // --- DEFEND mode bindings ---
+        $el('defend-calc').on('click', function() {
+          State.defendTarget = $el('defend-target').val();
+          State.defendArrival = $el('defend-arrival').val();
+          State.defendWaves = parseInt($el('defend-waves').val(), 10) || 4;
+          State.defendGap = parseInt($el('defend-gap').val(), 10) || 200;
+          State.defendUnit = $el('defend-unit').val();
+          State.save();
+
+          State.defendPlan = self._calcDefendPlan();
+          self.renderNobleTab();
+        });
+
+        $el('defend-unit').on('change', function() {
+          State.defendUnit = $(this).val();
+          State.save();
+          if (State.defendPlan) {
+            State.defendPlan = self._calcDefendPlan();
+            self.renderNobleTab();
+          }
+        });
+
+        // GO button — open rally point in new tab
+        $el('tab-noble').on('click', '.tws-defend-go', function() {
+          var villageId = $(this).data('village-id');
+          var targetX = $(this).data('target-x');
+          var targetY = $(this).data('target-y');
+          var url = '/game.php?village=' + villageId + '&screen=place&x=' + targetX + '&y=' + targetY + '&attack_type=support';
+          window.open(url, '_blank');
+        });
+      }
     },
 
     // ============================================================

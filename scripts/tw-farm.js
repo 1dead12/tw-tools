@@ -1643,8 +1643,25 @@
       return; // Not logged in or not in game
     }
 
+    // Always open on the Farm Assistant page so Accountmanager globals are available
+    // (templates, send_units_link, etc.) — redirect if not already there
+    var currentScreen = (typeof game_data !== 'undefined' && game_data.screen) || '';
+    if (currentScreen !== 'am_farm') {
+      var villageId = TWTools.getVillageId();
+      window.location.href = '/game.php?village=' + villageId + '&screen=am_farm';
+      // Store flag so we auto-init after redirect
+      TWTools.Storage.set('twf_autostart', true);
+      return;
+    }
+
     init();
     TWTools.UI.toast('TW Farm v' + VERSION + ' loaded', 'success');
   });
+
+  // Auto-start after redirect to am_farm
+  if (TWTools.Storage.get('twf_autostart')) {
+    TWTools.Storage.remove('twf_autostart');
+    // Already on am_farm page — init will be called by the $(function) above
+  }
 
 })(window, jQuery);
