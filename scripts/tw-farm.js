@@ -685,19 +685,24 @@
       // Accountmanager may not be fully initialized
     }
 
-    // Fallback: extract template IDs from the am_farm page HTML
-    // The page contains A/B buttons with data-template or onclick containing template_id
+    // Extract template IDs from am_farm HTML.
+    // The A/B farm buttons use: onclick="return Accountmanager.farm.sendUnits(this, TARGET_ID, TEMPLATE_ID)"
+    // Template A buttons have class "farm_icon_a", Template B have "farm_icon_b".
+    // We just need ONE of each to get the template IDs.
     if (realTemplateA === null) {
       var htmlStr0 = typeof html === 'string' ? html : '';
-      // Pattern: farm_icon_a with onclick containing template_id=N
-      var tmplMatchA = htmlStr0.match(/farm_icon_a[^>]*data-template[_-]id\s*=\s*["']?(\d+)/);
-      if (!tmplMatchA) tmplMatchA = htmlStr0.match(/class="farm_icon farm_icon_a"[^>]*onclick="[^"]*template_id:\s*(\d+)/);
-      if (!tmplMatchA) tmplMatchA = htmlStr0.match(/template_id['"]\s*:\s*(\d+)/);
+      // Match: farm_icon_a" ... sendUnits(this, NNNN, TEMPLATE_A_ID)
+      var tmplMatchA = htmlStr0.match(/farm_icon_a[^>]*sendUnits\(\s*this\s*,\s*\d+\s*,\s*(\d+)\s*\)/);
       if (tmplMatchA) realTemplateA = parseInt(tmplMatchA[1], 10);
+      // Also try templates['t_NNNN'] from script blocks
+      if (realTemplateA === null) {
+        var tmplStoreA = htmlStr0.match(/templates\['t_(\d+)'\]/);
+        if (tmplStoreA) realTemplateA = parseInt(tmplStoreA[1], 10);
+      }
     }
     if (realTemplateB === null) {
       var htmlStr0b = typeof html === 'string' ? html : '';
-      var tmplMatchB = htmlStr0b.match(/farm_icon_b[^>]*data-template[_-]id\s*=\s*["']?(\d+)/);
+      var tmplMatchB = htmlStr0b.match(/farm_icon_b[^>]*sendUnits\(\s*this\s*,\s*\d+\s*,\s*(\d+)\s*\)/);
       if (tmplMatchB) realTemplateB = parseInt(tmplMatchB[1], 10);
     }
 
@@ -706,16 +711,13 @@
       sendLink = Accountmanager.send_units_link;
     }
 
-    // Fallback: extract from the page's inline script blocks
+    // Extract send_units_link from inline script blocks in the AJAX-fetched HTML
+    // Pattern: Accountmanager.send_units_link = '/game.php?village=...&ajaxaction=farm&json=1&h=...';
     if (!sendLink) {
       var htmlStr = typeof html === 'string' ? html : '';
-      var sendLinkMatch = htmlStr.match(/send_units_link\s*[=:]\s*['"]([^'"]+)['"]/);
+      var sendLinkMatch = htmlStr.match(/Accountmanager\.send_units_link\s*=\s*'([^']+)'/);
+      if (!sendLinkMatch) sendLinkMatch = htmlStr.match(/send_units_link\s*[=:]\s*['"]([^'"]+)['"]/);
       if (sendLinkMatch) sendLink = sendLinkMatch[1];
-    }
-    if (!sendLink) {
-      var htmlStr2 = typeof html === 'string' ? html : '';
-      var sendLinkMatch2 = htmlStr2.match(/Accountmanager\.farm\s*\(\s*\{[^}]*url\s*:\s*['"]([^'"]+)['"]/);
-      if (sendLinkMatch2) sendLink = sendLinkMatch2[1];
     }
 
     // Parse the #plunder_list table
@@ -1147,11 +1149,13 @@
       idx++;
 
       // Send farm attack via the Farm Assistant endpoint.
-      // URL format: /game.php?village={source}&screen=am_farm&ajaxaction=farm&h={csrf}
+      // Real URL format from game: /game.php?village={source}&screen=am_farm&mode=farm&ajaxaction=farm&json=1&h={csrf}
       // POST data: {target: villageId, template_id: templateId, source: sourceVillageId}
       var csrf = csrfToken || (typeof game_data !== 'undefined' ? game_data.csrf : '');
-      var url = '/game.php?village=' + entry.sourceId +
-        '&screen=am_farm&ajaxaction=farm&h=' + encodeURIComponent(csrf);
+      var url = sendUnitsLink
+        ? sendUnitsLink.replace(/village=\d+/, 'village=' + entry.sourceId)
+        : '/game.php?village=' + entry.sourceId +
+          '&screen=am_farm&mode=farm&ajaxaction=farm&json=1&h=' + encodeURIComponent(csrf);
 
       $.ajax({
         url: url,
