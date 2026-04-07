@@ -2,17 +2,17 @@
   'use strict';
 
   // ============================================================
-  // TW MASS SCAVENGE v2.0.0
+  // TW MASS SCAVENGE v3.0.0
   // ============================================================
-  // Enhanced mass scavenging script for Tribal Wars.
-  // Calculates optimal troop distribution across scavenge tiers
-  // and sends squads in batches. Uses TWTools core library.
+  // Mass scavenging script for Tribal Wars.
+  // Calculates optimal troop distribution across scavenge tiers.
+  // Click-through sending: 1 click = 1 POST (TW rule compliant).
+  // Training: suggest-only — shows direct links, no auto-POST.
   //
   // REQUIRES: window.TWTools (tw-core.js)
-  // NEVER auto-sends without user action.
   // ============================================================
 
-  var VERSION = '2.0.0';
+  var VERSION = '3.0.0';
   var ID_PREFIX = 'twsc-';
   var STORAGE_PREFIX = 'twsc_';
 
@@ -52,12 +52,6 @@
     { tier: 3, duration_initial_seconds: 1800, duration_factor: 1, duration_exponent: 0.45, loot_factor: 0.50 },
     { tier: 4, duration_initial_seconds: 1800, duration_factor: 1, duration_exponent: 0.45, loot_factor: 0.75 }
   ];
-
-  /**
-   * Maximum squads per API call (server limit).
-   * @type {number}
-   */
-  var BATCH_SIZE = 200;
 
   // ============================================================
   // STORAGE (wraps TWTools.Storage with local prefix)
@@ -117,17 +111,11 @@
     /** @type {boolean[]} Selected tiers (0-indexed, tier 1-4). */
     selectedTiers: [true, true, true, true],
 
-    /** @type {boolean} Whether auto-train is enabled. */
-    trainEnabled: false,
-
     /** @type {number} Target spear count per village. */
     trainTargetSpear: 3000,
 
     /** @type {number} Target light cavalry count per village. */
     trainTargetLC: 1500,
-
-    /** @type {number} Minimum resource reserve per type (wood/clay/iron). */
-    trainResourceReserve: 5000,
 
     load: function() {
       this.unitTypes = Store.get('unitTypes', ['spear', 'sword', 'axe', 'light']);
@@ -138,10 +126,8 @@
       this.defaultGroup = Store.get('defaultGroup', '0');
       this.distributionMode = Store.get('distributionMode', 'balanced');
       this.selectedTiers = Store.get('selectedTiers', [true, true, true, true]);
-      this.trainEnabled = Store.get('trainEnabled', false);
       this.trainTargetSpear = Store.get('trainTargetSpear', 3000);
       this.trainTargetLC = Store.get('trainTargetLC', 1500);
-      this.trainResourceReserve = Store.get('trainResourceReserve', 5000);
     },
 
     save: function() {
@@ -153,10 +139,8 @@
       Store.set('defaultGroup', this.defaultGroup);
       Store.set('distributionMode', this.distributionMode);
       Store.set('selectedTiers', this.selectedTiers);
-      Store.set('trainEnabled', this.trainEnabled);
       Store.set('trainTargetSpear', this.trainTargetSpear);
       Store.set('trainTargetLC', this.trainTargetLC);
-      Store.set('trainResourceReserve', this.trainResourceReserve);
     },
 
     /**
@@ -1176,76 +1160,135 @@
   // ============================================================
 
   /**
-   * Sends scavenge squads to the TW API one-per-village sequentially.
-   * Each squad is sent as a separate request to the village's scavenge endpoint.
+   * Sends scavenge squads to the TW API one-at-a-time via user clicks.
+   * Each click = exactly 1 POST (compliant with TW "one action per click" rule).
    */
   var Sender = {
-    /** @private {boolean} Whether a send operation is in progress. */
+    /** @private {boolean} Whether a send operation is in progress (single squad being sent). */
     _sending: false,
 
-    /** @private {number} Total squads to send. */
+    /** @private {Object[]} Queue of squads waiting to be sent. */
+    _queue: [],
+
+    /** @private {number} Total squads planned. */
     _total: 0,
 
     /** @private {number} Squads sent so far. */
     _sent: 0,
 
+    /** @private {number} Squads skipped. */
+    _skipped: 0,
+
     /** @private {number} Errors encountered. */
     _errors: 0,
 
-    /**
-     * Send all squads for checked villages.
-     * Sends one request per squad (each squad = one tier for one village).
-     * @param {Object[]} allSquads - Array of squad payloads (village_id, candidate_squad, carry_max, option_id).
-     * @param {function(Object)} onProgress - Progress callback.
-     * @param {function(Object)} onComplete - Completion callback.
-     */
-    send: function(allSquads, onProgress, onComplete) {
-      if (this._sending) return;
+    /** @private {Object[]} Enriched queue items with village name/coords for display. */
+    _displayQueue: [],
 
-      this._sending = true;
+    /** @private {function|null} Callback when all squads are done or cancelled. */
+    _onComplete: null,
+
+    /** @private {function|null} Callback after each send/skip. */
+    _onUpdate: null,
+
+    /**
+     * Initialize a click-through send session.
+     * Does NOT send anything — just prepares the queue for user-driven sending.
+     * @param {Object[]} allSquads - Array of squad payloads.
+     * @param {Object[]} displayInfo - Matching array with { villageName, coords, tier, troops, duration } for display.
+     * @param {function} onUpdate - Called after each send/skip with current state.
+     * @param {function} onComplete - Called when queue is exhausted or cancelled.
+     */
+    initSession: function(allSquads, displayInfo, onUpdate, onComplete) {
+      this._queue = allSquads.slice();
+      this._displayQueue = displayInfo.slice();
       this._total = allSquads.length;
       this._sent = 0;
+      this._skipped = 0;
       this._errors = 0;
+      this._onUpdate = onUpdate;
+      this._onComplete = onComplete;
+    },
 
-      if (allSquads.length === 0) {
-        this._sending = false;
-        onComplete({ sent: 0, errors: 0, total: 0 });
-        return;
-      }
+    /**
+     * Send the current (first) squad in the queue. One click = one POST.
+     */
+    sendCurrent: function() {
+      if (this._sending || this._queue.length === 0) return;
 
       var self = this;
-      var queue = allSquads.slice();
+      var squad = this._queue.shift();
+      this._displayQueue.shift();
+      this._sending = true;
 
-      var sendNext = function() {
-        if (queue.length === 0) {
-          self._sending = false;
-          onComplete({
-            sent: self._sent,
-            errors: self._errors,
-            total: self._total
-          });
-          return;
+      this._sendSingleSquad(squad, function(success) {
+        self._sending = false;
+        if (success) {
+          self._sent++;
+        } else {
+          self._errors++;
         }
+        if (self._onUpdate) self._onUpdate(self.getState());
+        if (self._queue.length === 0 && self._onComplete) {
+          self._onComplete(self.getState());
+        }
+      });
+    },
 
-        var squad = queue.shift();
-        self._sendSingleSquad(squad, function(success) {
-          if (success) {
-            self._sent++;
-          } else {
-            self._errors++;
-          }
-          onProgress({
-            sent: self._sent,
-            errors: self._errors,
-            total: self._total,
-            percent: Math.round(((self._sent + self._errors) / self._total) * 100)
-          });
-          // Delay between requests to avoid rate limiting
-          setTimeout(sendNext, 250);
-        });
+    /**
+     * Skip the current squad without sending.
+     */
+    skipCurrent: function() {
+      if (this._sending || this._queue.length === 0) return;
+
+      this._queue.shift();
+      this._displayQueue.shift();
+      this._skipped++;
+      if (this._onUpdate) this._onUpdate(this.getState());
+      if (this._queue.length === 0 && this._onComplete) {
+        this._onComplete(this.getState());
+      }
+    },
+
+    /**
+     * Cancel the session — clear queue.
+     */
+    cancelSession: function() {
+      this._queue = [];
+      this._displayQueue = [];
+      if (this._onComplete) this._onComplete(this.getState());
+    },
+
+    /**
+     * Get current session state.
+     * @returns {Object} State object.
+     */
+    getState: function() {
+      return {
+        total: this._total,
+        sent: this._sent,
+        skipped: this._skipped,
+        errors: this._errors,
+        remaining: this._queue.length,
+        currentSquad: this._displayQueue.length > 0 ? this._displayQueue[0] : null,
+        queue: this._displayQueue
       };
+    },
 
-      sendNext();
+    /**
+     * Check if a squad is currently being sent (POST in flight).
+     * @returns {boolean}
+     */
+    isBusy: function() {
+      return this._sending;
+    },
+
+    /**
+     * Check if there are squads remaining in the queue.
+     * @returns {boolean}
+     */
+    hasRemaining: function() {
+      return this._queue.length > 0;
     },
 
     /**
@@ -1312,11 +1355,11 @@
     },
 
     /**
-     * Check if a send operation is in progress.
-     * @returns {boolean} True if sending.
+     * Check if a send session is active (queue has items or POST in flight).
+     * @returns {boolean} True if session is active.
      */
-    isSending: function() {
-      return this._sending;
+    isActive: function() {
+      return this._sending || this._queue.length > 0;
     }
   };
 
@@ -1325,290 +1368,51 @@
   // ============================================================
 
   /**
-   * Unit training costs per unit (wood, clay, iron, pop).
-   * @type {Object.<string, Object>}
-   */
-  var UNIT_COSTS = {
-    spear: { wood: 50, clay: 30, iron: 10, pop: 1 },
-    light: { wood: 125, clay: 100, iron: 250, pop: 4 }
-  };
-
-  /**
-   * Handles auto-training of spear fighters and light cavalry.
-   * Fetches barracks/stable pages, reads resources + queue, and POSTs train orders.
+   * Training suggest helper (no auto-POST).
+   * Builds a list of villages needing training with direct links to barracks/stable.
    */
   var Trainer = {
-    /** @private {boolean} Whether a training run is in progress. */
-    _running: false,
-
-    /** @private {number} Total villages to process. */
-    _total: 0,
-
-    /** @private {number} Villages processed so far. */
-    _processed: 0,
-
-    /** @private {Array} Collected results per village. */
-    _results: [],
-
     /**
-     * Check if trainer is currently running.
-     * @returns {boolean}
-     */
-    isRunning: function() {
-      return this._running;
-    },
-
-    /**
-     * Run training for a list of villages (700+ points, checked).
-     * Processes villages sequentially to avoid rate limiting.
+     * Build suggest data for villages that need training.
+     * Returns an array of objects with village info, current/target counts, and direct links.
      *
-     * @param {Array.<Object>} villages - Village objects with .id, .name, .troops.
-     * @param {function(Object)} onProgress - Progress callback ({ processed, total, village, result }).
-     * @param {function(Object)} onComplete - Completion callback ({ processed, total, results }).
+     * @param {Array.<Object>} villages - Village objects with .id, .name, .coords, .troops.
+     * @returns {Array.<Object>} Suggest items with links.
      */
-    run: function(villages, onProgress, onComplete) {
-      if (this._running) return;
-
-      this._running = true;
-      this._total = villages.length;
-      this._processed = 0;
-      this._results = [];
-
-      if (villages.length === 0) {
-        this._running = false;
-        onComplete({ processed: 0, total: 0, results: [] });
-        return;
-      }
-
-      var self = this;
-      var queue = villages.slice();
-
-      var processNext = function() {
-        if (queue.length === 0) {
-          self._running = false;
-          onComplete({
-            processed: self._processed,
-            total: self._total,
-            results: self._results
-          });
-          return;
-        }
-
-        var village = queue.shift();
-        self._trainVillage(village, function(result) {
-          self._processed++;
-          self._results.push(result);
-          onProgress({
-            processed: self._processed,
-            total: self._total,
-            village: village,
-            result: result
-          });
-          // 300ms delay between villages to avoid rate limiting
-          setTimeout(processNext, 300);
-        });
-      };
-
-      processNext();
-    },
-
-    /**
-     * Train spear + LC for a single village.
-     * Fetches barracks, queues spears, then fetches stable, queues LC.
-     *
-     * @private
-     * @param {Object} village - Village object with .id, .name, .troops.
-     * @param {function(Object)} callback - Called with result object.
-     */
-    _trainVillage: function(village, callback) {
-      var self = this;
-      var result = {
-        villageId: village.id,
-        villageName: village.name,
-        spearQueued: 0,
-        lcQueued: 0,
-        spearError: null,
-        lcError: null
-      };
-
-      var currentSpear = (village.troops && village.troops.spear) || 0;
-      var currentLC = (village.troops && village.troops.light) || 0;
+    buildSuggestions: function(villages) {
+      var suggestions = [];
       var targetSpear = Settings.trainTargetSpear;
       var targetLC = Settings.trainTargetLC;
-      var reserve = Settings.trainResourceReserve;
+      var gameBase = window.location.pathname || '/game.php';
 
-      var needSpear = Math.max(0, targetSpear - currentSpear);
-      var needLC = Math.max(0, targetLC - currentLC);
+      villages.forEach(function(v) {
+        var curSpear = (v.troops && v.troops.spear) || 0;
+        var curLC = (v.troops && v.troops.light) || 0;
+        var needSpear = curSpear < targetSpear;
+        var needLC = curLC < targetLC;
 
-      // Step 1: Train spears via barracks
-      if (needSpear > 0) {
-        self._fetchAndTrain(village.id, 'barracks', 'spear', needSpear, reserve, function(queued, err) {
-          result.spearQueued = queued;
-          result.spearError = err;
+        if (!needSpear && !needLC) return;
 
-          // Step 2: Train LC via stable
-          if (needLC > 0) {
-            // Small delay between barracks and stable requests
-            setTimeout(function() {
-              self._fetchAndTrain(village.id, 'stable', 'light', needLC, reserve, function(lcQueued, lcErr) {
-                result.lcQueued = lcQueued;
-                result.lcError = lcErr;
-                callback(result);
-              });
-            }, 200);
-          } else {
-            callback(result);
-          }
+        var coordStr = v.coords ? '(' + v.coords.x + '|' + v.coords.y + ')' : '';
+        var barracksUrl = '/game.php?village=' + v.id + '&screen=barracks';
+        var stableUrl = '/game.php?village=' + v.id + '&screen=stable';
+
+        suggestions.push({
+          villageId: v.id,
+          villageName: v.name || 'Village',
+          coordStr: coordStr,
+          curSpear: curSpear,
+          targetSpear: targetSpear,
+          needSpear: needSpear,
+          curLC: curLC,
+          targetLC: targetLC,
+          needLC: needLC,
+          barracksUrl: barracksUrl,
+          stableUrl: stableUrl
         });
-      } else if (needLC > 0) {
-        self._fetchAndTrain(village.id, 'stable', 'light', needLC, reserve, function(lcQueued, lcErr) {
-          result.lcQueued = lcQueued;
-          result.lcError = lcErr;
-          callback(result);
-        });
-      } else {
-        // Nothing needed
-        callback(result);
-      }
-    },
-
-    /**
-     * Fetch a building page (barracks/stable) and POST a train order.
-     *
-     * @private
-     * @param {number} villageId - Village ID.
-     * @param {string} screen - Building screen name ('barracks' or 'stable').
-     * @param {string} unitType - Unit type to train ('spear' or 'light').
-     * @param {number} desired - Number of units desired.
-     * @param {number} reserve - Resource reserve to keep.
-     * @param {function(number, string|null)} callback - Called with (queued count, error or null).
-     */
-    _fetchAndTrain: function(villageId, screen, unitType, desired, reserve, callback) {
-      var fetchUrl = '/game.php?village=' + villageId + '&screen=' + screen;
-
-      $.ajax({
-        url: fetchUrl,
-        dataType: 'html',
-        success: function(html) {
-          // Parse resources from the page
-          var resources = Trainer._parseResources(html);
-          if (!resources) {
-            callback(0, 'Could not parse resources');
-            return;
-          }
-
-          // Calculate max trainable based on resources and reserve
-          var costs = UNIT_COSTS[unitType];
-          if (!costs) {
-            callback(0, 'Unknown unit type');
-            return;
-          }
-
-          var availWood = Math.max(0, resources.wood - reserve);
-          var availClay = Math.max(0, resources.clay - reserve);
-          var availIron = Math.max(0, resources.iron - reserve);
-
-          var maxByWood = costs.wood > 0 ? Math.floor(availWood / costs.wood) : Infinity;
-          var maxByClay = costs.clay > 0 ? Math.floor(availClay / costs.clay) : Infinity;
-          var maxByIron = costs.iron > 0 ? Math.floor(availIron / costs.iron) : Infinity;
-          var maxByRes = Math.min(maxByWood, maxByClay, maxByIron);
-
-          if (maxByRes <= 0) {
-            callback(0, 'Insufficient resources (reserve=' + reserve + ')');
-            return;
-          }
-
-          var toTrain = Math.min(desired, maxByRes);
-          if (toTrain <= 0) {
-            callback(0, null);
-            return;
-          }
-
-          // POST the train order
-          var csrf = (typeof game_data !== 'undefined') ? game_data.csrf : '';
-          var trainUrl = '/game.php?village=' + villageId +
-                         '&screen=' + screen +
-                         '&ajaxaction=train&mode=train&h=' + encodeURIComponent(csrf);
-
-          var units = {};
-          units[unitType] = toTrain;
-
-          $.ajax({
-            url: trainUrl,
-            type: 'POST',
-            dataType: 'json',
-            contentType: 'application/x-www-form-urlencoded; charset=UTF-8',
-            data: $.param({ units: units }),
-            success: function(resp) {
-              if (resp && !resp.error) {
-                console.log('[TW-Scavenge/Train] Queued ' + toTrain + ' ' + unitType + ' in village ' + villageId);
-                callback(toTrain, null);
-              } else {
-                var errMsg = (resp && resp.error) ? resp.error : 'Unknown error';
-                console.log('[TW-Scavenge/Train] Error for village ' + villageId + ': ' + errMsg);
-                callback(0, errMsg);
-              }
-            },
-            error: function(xhr) {
-              console.log('[TW-Scavenge/Train] HTTP error for village ' + villageId + ': ' + xhr.status);
-              callback(0, 'HTTP ' + xhr.status);
-            }
-          });
-        },
-        error: function(xhr) {
-          callback(0, 'Failed to fetch ' + screen + ' page: HTTP ' + xhr.status);
-        }
       });
-    },
 
-    /**
-     * Parse resource values from a building page HTML.
-     * Looks for the standard TW resource bar (#wood, #stone, #iron) or
-     * inline JavaScript game_data resource values.
-     *
-     * @private
-     * @param {string} html - Raw HTML of the building page.
-     * @returns {?{wood: number, clay: number, iron: number}} Parsed resources or null.
-     */
-    _parseResources: function(html) {
-      // Method 1: Parse from inline game_data or resource variables in script tags
-      var woodMatch = html.match(/id="wood"\s*[^>]*>[\s]*([\d.]+)/);
-      var clayMatch = html.match(/id="stone"\s*[^>]*>[\s]*([\d.]+)/);
-      var ironMatch = html.match(/id="iron"\s*[^>]*>[\s]*([\d.]+)/);
-
-      if (woodMatch && clayMatch && ironMatch) {
-        return {
-          wood: parseInt(woodMatch[1].replace(/\./g, ''), 10) || 0,
-          clay: parseInt(clayMatch[1].replace(/\./g, ''), 10) || 0,
-          iron: parseInt(ironMatch[1].replace(/\./g, ''), 10) || 0
-        };
-      }
-
-      // Method 2: Try reading from the live DOM (current page resources)
-      if (typeof game_data !== 'undefined' && game_data.village) {
-        var gv = game_data.village;
-        if (gv.wood !== undefined && gv.stone !== undefined && gv.iron !== undefined) {
-          return {
-            wood: parseInt(gv.wood, 10) || 0,
-            clay: parseInt(gv.stone, 10) || 0,
-            iron: parseInt(gv.iron, 10) || 0
-          };
-        }
-      }
-
-      // Method 3: Parse from resource spans on current page
-      var $wood = $('#wood');
-      var $stone = $('#stone');
-      var $iron = $('#iron');
-      if ($wood.length && $stone.length && $iron.length) {
-        return {
-          wood: parseInt($wood.text().replace(/\./g, ''), 10) || 0,
-          clay: parseInt($stone.text().replace(/\./g, ''), 10) || 0,
-          iron: parseInt($iron.text().replace(/\./g, ''), 10) || 0
-        };
-      }
-
-      return null;
+      return suggestions;
     }
   };
 
@@ -1623,9 +1427,10 @@
     villages: [],
     tierParams: DEFAULT_TIER_PARAMS,
     durationSec: 8 * 3600,
-    sendInProgress: false,
-    lastResult: null,
-    trainResult: null
+    /** @type {boolean} Whether we are in click-through send mode. */
+    sendSessionActive: false,
+    /** @type {Object|null} Last completed send session result. */
+    lastResult: null
   };
 
   // ============================================================
@@ -1916,26 +1721,26 @@
         html += '</div>';
       }
 
-      // Summary + Send button
+      // Summary + Calculate button
       html += '<div style="margin-top:12px;display:flex;justify-content:space-between;align-items:center;">';
       html += '<div id="' + ID_PREFIX + 'summary" style="font-size:12px;color:#a89050;">' +
               UI._getSummaryText() + '</div>';
       html += '<button class="twsc-btn twsc-btn-primary" id="' + ID_PREFIX + 'send-btn"' +
-              (Sender.isSending() ? ' disabled' : '') + '>' +
-              (Sender.isSending() ? 'Sending...' : 'Send Scavenge') + '</button>';
+              (AppState.sendSessionActive ? ' disabled' : '') + '>' +
+              (AppState.sendSessionActive ? 'Session active...' : 'Calculate & Send') + '</button>';
       html += '</div>';
 
-      // Progress bar (hidden initially)
-      html += '<div id="' + ID_PREFIX + 'progress" style="display:none;margin-top:8px;">';
-      html += '<div class="twsc-progress-bar"><div class="twsc-progress-fill" id="' + ID_PREFIX + 'progress-fill"></div></div>';
-      html += '<div id="' + ID_PREFIX + 'progress-text" style="font-size:11px;color:#8a8070;text-align:center;margin-top:4px;"></div>';
-      html += '</div>';
+      // Click-through send panel (shown when session is active)
+      html += '<div id="' + ID_PREFIX + 'send-panel" style="display:none;margin-top:8px;"></div>';
 
       // Result
       if (AppState.lastResult) {
         html += '<div style="margin-top:8px;padding:8px 12px;border-radius:4px;' +
                 'background:rgba(76,175,80,0.1);border-left:3px solid #4caf50;font-size:12px;">';
         html += 'Sent: ' + AppState.lastResult.sent + ' / ' + AppState.lastResult.total + ' squads';
+        if (AppState.lastResult.skipped > 0) {
+          html += ' | Skipped: ' + AppState.lastResult.skipped;
+        }
         if (AppState.lastResult.errors > 0) {
           html += ' | <span style="color:#f44336;">Errors: ' + AppState.lastResult.errors + '</span>';
         }
@@ -2036,11 +1841,12 @@
     },
 
     /**
-     * Handle the send button click. Build plans and send squads.
+     * Handle the Calculate & Send button click.
+     * Builds plans, then shows a click-through panel where each click = 1 POST.
      * @private
      */
     _handleSend: function() {
-      if (Sender.isSending()) return;
+      if (AppState.sendSessionActive) return;
 
       var checkedVillages = AppState.villages.filter(function(v) { return v.checked; });
       if (checkedVillages.length === 0) {
@@ -2048,8 +1854,9 @@
         return;
       }
 
-      // Build squads for all checked villages
+      // Build squads for all checked villages + display info
       var allSquads = [];
+      var displayInfo = [];
       var mode = Settings.distributionMode;
       var tierOrder = Settings.tierPriority;
 
@@ -2066,7 +1873,24 @@
 
         if (plan.squads.length > 0) {
           var payloads = Calculator.buildSquadPayload(village.id, plan.squads);
-          allSquads = allSquads.concat(payloads);
+          for (var i = 0; i < payloads.length; i++) {
+            allSquads.push(payloads[i]);
+            var sq = plan.squads[i];
+            var troopParts = [];
+            Settings.unitTypes.forEach(function(u) {
+              if (sq.troops[u] && sq.troops[u] > 0) {
+                troopParts.push(u.charAt(0).toUpperCase() + ':' + sq.troops[u]);
+              }
+            });
+            displayInfo.push({
+              villageName: village.name || 'Village',
+              coords: village.coords,
+              tier: sq.tier,
+              troopStr: troopParts.join(' '),
+              duration: sq.duration,
+              capacity: sq.capacity
+            });
+          }
         }
       });
 
@@ -2075,31 +1899,147 @@
         return;
       }
 
-      // Show progress bar
-      $('#' + ID_PREFIX + 'progress').show();
-      $('#' + ID_PREFIX + 'send-btn').prop('disabled', true).text('Sending...');
+      // Activate send session
+      AppState.sendSessionActive = true;
       AppState.lastResult = null;
+      $('#' + ID_PREFIX + 'send-btn').prop('disabled', true).text('Session active...');
 
       var self = this;
-      Sender.send(
+      Sender.initSession(
         allSquads,
-        function onProgress(progress) {
-          $('#' + ID_PREFIX + 'progress-fill').css('width', progress.percent + '%');
-          $('#' + ID_PREFIX + 'progress-text').text(
-            'Sent ' + progress.sent + ' / ' + progress.total +
-            (progress.errors > 0 ? ' (' + progress.errors + ' errors)' : '')
-          );
+        displayInfo,
+        function onUpdate(state) {
+          self._renderSendPanel(state);
         },
-        function onComplete(result) {
-          AppState.lastResult = result;
-          $('#' + ID_PREFIX + 'send-btn').prop('disabled', false).text('Send Scavenge');
+        function onComplete(state) {
+          AppState.sendSessionActive = false;
+          AppState.lastResult = state;
+          // Unbind Enter key listener
+          $(document).off('keydown.' + ID_PREFIX + 'enter');
           TWTools.UI.toast(
-            'Scavenge complete: ' + result.sent + '/' + result.total + ' squads sent',
-            result.errors > 0 ? 'warning' : 'success'
+            'Done: ' + state.sent + ' sent, ' + state.skipped + ' skipped, ' + state.errors + ' errors',
+            state.errors > 0 ? 'warning' : 'success'
           );
           self.renderScavengeTab();
         }
       );
+
+      // Render initial send panel
+      this._renderSendPanel(Sender.getState());
+    },
+
+    /**
+     * Render the click-through send panel showing the queue and send/skip/cancel buttons.
+     * @private
+     * @param {Object} state - Current Sender state from getState().
+     */
+    _renderSendPanel: function(state) {
+      var $panel = $('#' + ID_PREFIX + 'send-panel');
+      if ($panel.length === 0) return;
+
+      if (!state.currentSquad && state.remaining === 0) {
+        $panel.hide();
+        return;
+      }
+
+      $panel.show();
+      var html = '';
+
+      // Progress header
+      var done = state.sent + state.skipped + state.errors;
+      html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">';
+      html += '<span style="font-size:13px;font-weight:bold;color:#e0c882;">' +
+              done + ' / ' + state.total + ' processed</span>';
+      html += '<span style="font-size:11px;color:#8a8070;">' +
+              state.sent + ' sent, ' + state.skipped + ' skipped' +
+              (state.errors > 0 ? ', ' + state.errors + ' errors' : '') + '</span>';
+      html += '</div>';
+
+      // Progress bar
+      var pct = state.total > 0 ? Math.round((done / state.total) * 100) : 0;
+      html += '<div class="twsc-progress-bar" style="margin-bottom:10px;"><div class="twsc-progress-fill" style="width:' + pct + '%;"></div></div>';
+
+      // Queue list (show up to 8 upcoming squads)
+      html += '<div style="max-height:200px;overflow-y:auto;border:1px solid #3a3a3a;border-radius:4px;margin-bottom:8px;">';
+      html += '<table class="twsc-table"><thead><tr>';
+      html += '<th style="width:30px;">#</th>';
+      html += '<th>Village</th>';
+      html += '<th>Tier</th>';
+      html += '<th>Troops</th>';
+      html += '<th>Duration</th>';
+      html += '</tr></thead><tbody>';
+
+      var maxShow = Math.min(state.queue.length, 8);
+      for (var i = 0; i < maxShow; i++) {
+        var item = state.queue[i];
+        var isActive = i === 0;
+        var rowStyle = isActive ? 'background:#2a3a1a;border-left:3px solid #4caf50;' : '';
+        var durStr = TWTools.pad2(Math.floor(item.duration / 3600)) + ':' +
+                     TWTools.pad2(Math.floor((item.duration % 3600) / 60));
+        var coordStr = item.coords ? '(' + item.coords.x + '|' + item.coords.y + ')' : '';
+
+        html += '<tr style="' + rowStyle + '">';
+        html += '<td style="color:#a89050;">' + (done + i + 1) + '</td>';
+        html += '<td>';
+        html += '<span class="twsc-village-name">' + UI._esc(item.villageName) + '</span>';
+        html += ' <span class="twsc-coords">' + coordStr + '</span>';
+        html += '</td>';
+        html += '<td><span class="twsc-tier-badge">' + item.tier + '</span></td>';
+        html += '<td class="twsc-troops" style="font-size:11px;">' + item.troopStr + '</td>';
+        html += '<td style="font-size:11px;color:#a89050;">' + durStr + '</td>';
+        html += '</tr>';
+      }
+      if (state.queue.length > maxShow) {
+        html += '<tr><td colspan="5" style="text-align:center;color:#555;font-size:11px;">... and ' +
+                (state.queue.length - maxShow) + ' more</td></tr>';
+      }
+
+      html += '</tbody></table></div>';
+
+      // Action buttons
+      html += '<div style="display:flex;gap:8px;align-items:center;">';
+      var busy = Sender.isBusy();
+      html += '<button class="twsc-btn twsc-btn-primary" id="' + ID_PREFIX + 'send-one"' +
+              (busy ? ' disabled' : '') + '>' +
+              (busy ? 'Sending...' : 'Send (Enter)') + '</button>';
+      html += '<button class="twsc-btn twsc-btn-outline" id="' + ID_PREFIX + 'skip-one"' +
+              (busy ? ' disabled' : '') + '>Skip</button>';
+      html += '<button class="twsc-btn" id="' + ID_PREFIX + 'cancel-send" style="margin-left:auto;color:#f44336;">Cancel</button>';
+      html += '</div>';
+
+      $panel.html(html);
+
+      // Bind send panel button events
+      UI._bindSendPanelEvents();
+    },
+
+    /**
+     * Bind events for the click-through send panel buttons.
+     * @private
+     */
+    _bindSendPanelEvents: function() {
+      // Send one squad
+      $(document).off('click.' + ID_PREFIX + 'so').on('click.' + ID_PREFIX + 'so', '#' + ID_PREFIX + 'send-one', function() {
+        Sender.sendCurrent();
+      });
+
+      // Skip one squad
+      $(document).off('click.' + ID_PREFIX + 'sk').on('click.' + ID_PREFIX + 'sk', '#' + ID_PREFIX + 'skip-one', function() {
+        Sender.skipCurrent();
+      });
+
+      // Cancel session
+      $(document).off('click.' + ID_PREFIX + 'cs').on('click.' + ID_PREFIX + 'cs', '#' + ID_PREFIX + 'cancel-send', function() {
+        Sender.cancelSession();
+      });
+
+      // Enter key sends current squad
+      $(document).off('keydown.' + ID_PREFIX + 'enter').on('keydown.' + ID_PREFIX + 'enter', function(e) {
+        if (e.key === 'Enter' && AppState.sendSessionActive && !Sender.isBusy()) {
+          e.preventDefault();
+          Sender.sendCurrent();
+        }
+      });
     },
 
     // ----------------------------------------------------------
@@ -2201,19 +2141,11 @@
       html += '</select></div>';
       html += '</div></div>';
 
-      // Training section
+      // Training section (suggest only — no auto-POST)
       html += '<div class="twsc-section">';
-      html += '<div class="twsc-section-title">Training (Spear + Light Cavalry)</div>';
-      html += '<div style="display:flex;gap:16px;margin-top:8px;flex-wrap:wrap;align-items:center;">';
+      html += '<div class="twsc-section-title">Training (Spear + Light Cavalry) — Suggest Mode</div>';
 
-      // Enable checkbox
-      html += '<label class="twsc-radio">';
-      html += '<input type="checkbox" id="' + ID_PREFIX + 'train-enabled"' +
-              (Settings.trainEnabled ? ' checked' : '') + '> Auto-Train Enabled';
-      html += '</label>';
-      html += '</div>';
-
-      // Targets + reserve
+      // Targets
       html += '<div style="display:flex;gap:16px;margin-top:8px;flex-wrap:wrap;">';
       html += '<div><label style="font-size:11px;color:#a89050;">Target Spear / village:</label><br>';
       html += '<input type="number" class="twsc-input" id="' + ID_PREFIX + 'train-spear" value="' +
@@ -2221,76 +2153,15 @@
       html += '<div><label style="font-size:11px;color:#a89050;">Target LC / village:</label><br>';
       html += '<input type="number" class="twsc-input" id="' + ID_PREFIX + 'train-lc" value="' +
               Settings.trainTargetLC + '" min="0" step="100" style="width:80px;"></div>';
-      html += '<div><label style="font-size:11px;color:#a89050;">Resource Reserve:</label><br>';
-      html += '<input type="number" class="twsc-input" id="' + ID_PREFIX + 'train-reserve" value="' +
-              Settings.trainResourceReserve + '" min="0" step="1000" style="width:80px;"></div>';
       html += '</div>';
 
-      // Current troop counts for checked villages (700+ pts)
-      var trainVillages = AppState.villages.filter(function(v) { return v.checked; });
-      if (trainVillages.length > 0) {
-        html += '<div style="margin-top:8px;max-height:150px;overflow-y:auto;border:1px solid #333;border-radius:4px;">';
-        html += '<table class="twsc-table twsc-table-sm"><thead><tr>';
-        html += '<th>Village</th>';
-        html += '<th>Spear</th>';
-        html += '<th>Target</th>';
-        html += '<th>LC</th>';
-        html += '<th>Target</th>';
-        html += '</tr></thead><tbody>';
-
-        trainVillages.forEach(function(v) {
-          var curSpear = (v.troops && v.troops.spear) || 0;
-          var curLC = (v.troops && v.troops.light) || 0;
-          var spearColor = curSpear >= Settings.trainTargetSpear ? '#4caf50' : '#f44336';
-          var lcColor = curLC >= Settings.trainTargetLC ? '#4caf50' : '#f44336';
-
-          html += '<tr>';
-          html += '<td>' + UI._esc(v.name || 'Village ' + v.id) + '</td>';
-          html += '<td style="color:' + spearColor + ';">' + curSpear + '</td>';
-          html += '<td>' + Settings.trainTargetSpear + '</td>';
-          html += '<td style="color:' + lcColor + ';">' + curLC + '</td>';
-          html += '<td>' + Settings.trainTargetLC + '</td>';
-          html += '</tr>';
-        });
-
-        html += '</tbody></table></div>';
-      } else {
-        html += '<div style="margin-top:8px;font-size:12px;color:#555;">Select villages on the Scavenge tab to see troop counts.</div>';
-      }
-
-      // Train button
-      html += '<div style="margin-top:8px;display:flex;gap:8px;align-items:center;">';
-      html += '<button class="twsc-btn twsc-btn-primary" id="' + ID_PREFIX + 'train-btn"' +
-              (Trainer.isRunning() ? ' disabled' : '') + '>' +
-              (Trainer.isRunning() ? 'Training...' : 'Train Selected Villages') + '</button>';
-      html += '<span id="' + ID_PREFIX + 'train-status" style="font-size:11px;color:#a89050;"></span>';
+      // Show Suggestions button
+      html += '<div style="margin-top:8px;">';
+      html += '<button class="twsc-btn twsc-btn-primary" id="' + ID_PREFIX + 'train-suggest-btn">Show Training Suggestions</button>';
       html += '</div>';
 
-      // Training progress bar (hidden initially)
-      html += '<div id="' + ID_PREFIX + 'train-progress" style="display:none;margin-top:8px;">';
-      html += '<div class="twsc-progress-bar"><div class="twsc-progress-fill" id="' + ID_PREFIX + 'train-progress-fill"></div></div>';
-      html += '<div id="' + ID_PREFIX + 'train-progress-text" style="font-size:11px;color:#8a8070;text-align:center;margin-top:4px;"></div>';
-      html += '</div>';
-
-      // Training result
-      if (AppState.trainResult) {
-        var tr = AppState.trainResult;
-        var totalSpear = 0;
-        var totalLC = 0;
-        var trainErrors = 0;
-        tr.results.forEach(function(r) {
-          totalSpear += r.spearQueued;
-          totalLC += r.lcQueued;
-          if (r.spearError || r.lcError) trainErrors++;
-        });
-        html += '<div style="margin-top:8px;padding:8px 12px;border-radius:4px;' +
-                'background:rgba(76,175,80,0.1);border-left:3px solid #4caf50;font-size:12px;">';
-        html += 'Trained: ' + totalSpear + ' spear, ' + totalLC + ' LC across ' + tr.processed + ' villages';
-        if (trainErrors > 0) {
-          html += ' | <span style="color:#f44336;">Errors in ' + trainErrors + ' village(s)</span>';
-        }
-        html += '</div>';
-      }
+      // Suggestions container (populated on button click)
+      html += '<div id="' + ID_PREFIX + 'train-suggestions" style="margin-top:8px;"></div>';
 
       html += '</div>';
 
@@ -2347,9 +2218,9 @@
         }
       });
 
-      // Train button
-      $(document).off('click.' + ID_PREFIX + 'tr').on('click.' + ID_PREFIX + 'tr', '#' + ID_PREFIX + 'train-btn', function() {
-        self._handleTrain();
+      // Train suggest button
+      $(document).off('click.' + ID_PREFIX + 'tr').on('click.' + ID_PREFIX + 'tr', '#' + ID_PREFIX + 'train-suggest-btn', function() {
+        self._handleTrainSuggest();
       });
 
       // Save settings button
@@ -2391,10 +2262,8 @@
         Settings.defaultGroup = $('#' + ID_PREFIX + 'default-group').val();
 
         // Read training settings
-        Settings.trainEnabled = $('#' + ID_PREFIX + 'train-enabled').is(':checked');
         Settings.trainTargetSpear = parseInt($('#' + ID_PREFIX + 'train-spear').val(), 10) || 0;
         Settings.trainTargetLC = parseInt($('#' + ID_PREFIX + 'train-lc').val(), 10) || 0;
-        Settings.trainResourceReserve = parseInt($('#' + ID_PREFIX + 'train-reserve').val(), 10) || 0;
 
         Settings.save();
         TWTools.UI.toast('Settings saved', 'success');
@@ -2402,71 +2271,78 @@
     },
 
     /**
-     * Handle the Train button click.
-     * Reads current training settings from inputs, saves them, then runs
-     * the trainer for all checked villages.
+     * Handle the Show Training Suggestions button click.
+     * Reads current targets from inputs, builds suggestions, and renders a table
+     * with direct links to barracks/stable pages (no auto-POST).
      * @private
      */
-    _handleTrain: function() {
-      if (Trainer.isRunning()) return;
-
-      // Read and save training settings from current inputs before running
-      Settings.trainEnabled = $('#' + ID_PREFIX + 'train-enabled').is(':checked');
+    _handleTrainSuggest: function() {
+      // Read targets from current inputs
       Settings.trainTargetSpear = parseInt($('#' + ID_PREFIX + 'train-spear').val(), 10) || 0;
       Settings.trainTargetLC = parseInt($('#' + ID_PREFIX + 'train-lc').val(), 10) || 0;
-      Settings.trainResourceReserve = parseInt($('#' + ID_PREFIX + 'train-reserve').val(), 10) || 0;
       Settings.save();
 
-      // Filter checked villages that need training
       var checkedVillages = AppState.villages.filter(function(v) { return v.checked; });
       if (checkedVillages.length === 0) {
         TWTools.UI.toast('No villages selected — select villages on the Scavenge tab', 'warning');
         return;
       }
 
-      // Filter to villages that actually need training
-      var toTrain = checkedVillages.filter(function(v) {
-        var curSpear = (v.troops && v.troops.spear) || 0;
-        var curLC = (v.troops && v.troops.light) || 0;
-        return curSpear < Settings.trainTargetSpear || curLC < Settings.trainTargetLC;
-      });
+      var suggestions = Trainer.buildSuggestions(checkedVillages);
+      var $container = $('#' + ID_PREFIX + 'train-suggestions');
 
-      if (toTrain.length === 0) {
-        TWTools.UI.toast('All selected villages already meet targets', 'success');
+      if (suggestions.length === 0) {
+        $container.html('<div style="padding:8px;color:#4caf50;font-size:12px;">All selected villages already meet targets.</div>');
         return;
       }
 
-      // Show progress
-      $('#' + ID_PREFIX + 'train-progress').show();
-      $('#' + ID_PREFIX + 'train-btn').prop('disabled', true).text('Training...');
-      AppState.trainResult = null;
+      var html = '';
+      html += '<div style="font-size:11px;color:#a89050;margin-bottom:4px;">' +
+              suggestions.length + ' village(s) need training. Click links to open barracks/stable:</div>';
+      html += '<div style="max-height:250px;overflow-y:auto;border:1px solid #333;border-radius:4px;">';
+      html += '<table class="twsc-table twsc-table-sm"><thead><tr>';
+      html += '<th>Village</th>';
+      html += '<th>Spear</th>';
+      html += '<th>LC</th>';
+      html += '</tr></thead><tbody>';
 
-      var self = this;
-      Trainer.run(
-        toTrain,
-        function onProgress(progress) {
-          var pct = Math.round((progress.processed / progress.total) * 100);
-          $('#' + ID_PREFIX + 'train-progress-fill').css('width', pct + '%');
-          var statusParts = [progress.processed + '/' + progress.total + ' villages'];
-          if (progress.result.spearQueued > 0) statusParts.push('+' + progress.result.spearQueued + ' spear');
-          if (progress.result.lcQueued > 0) statusParts.push('+' + progress.result.lcQueued + ' LC');
-          $('#' + ID_PREFIX + 'train-progress-text').text(statusParts.join(' | '));
-        },
-        function onComplete(result) {
-          AppState.trainResult = result;
-          var totalSpear = 0;
-          var totalLC = 0;
-          result.results.forEach(function(r) {
-            totalSpear += r.spearQueued;
-            totalLC += r.lcQueued;
-          });
-          TWTools.UI.toast(
-            'Training complete: ' + totalSpear + ' spear + ' + totalLC + ' LC queued',
-            'success'
-          );
-          self.renderSettingsTab();
+      suggestions.forEach(function(s) {
+        html += '<tr>';
+        // Village name + coords
+        html += '<td>';
+        html += '<span class="twsc-village-name">' + UI._esc(s.villageName) + '</span>';
+        html += ' <span class="twsc-coords">' + s.coordStr + '</span>';
+        html += '</td>';
+
+        // Spear column: current/target + Train link
+        html += '<td>';
+        var spearColor = s.needSpear ? '#f44336' : '#4caf50';
+        html += '<span style="color:' + spearColor + ';">' + s.curSpear + '</span>';
+        html += '/' + s.targetSpear;
+        if (s.needSpear) {
+          html += ' <a href="' + s.barracksUrl + '" target="_blank" ' +
+                  'style="color:#e0c882;text-decoration:none;font-weight:bold;font-size:11px;" ' +
+                  'title="Open barracks for this village">[Train &rarr;]</a>';
         }
-      );
+        html += '</td>';
+
+        // LC column: current/target + Train link
+        html += '<td>';
+        var lcColor = s.needLC ? '#f44336' : '#4caf50';
+        html += '<span style="color:' + lcColor + ';">' + s.curLC + '</span>';
+        html += '/' + s.targetLC;
+        if (s.needLC) {
+          html += ' <a href="' + s.stableUrl + '" target="_blank" ' +
+                  'style="color:#e0c882;text-decoration:none;font-weight:bold;font-size:11px;" ' +
+                  'title="Open stable for this village">[Train &rarr;]</a>';
+        }
+        html += '</td>';
+
+        html += '</tr>';
+      });
+
+      html += '</tbody></table></div>';
+      $container.html(html);
     },
 
     // ----------------------------------------------------------
@@ -2587,6 +2463,8 @@
       '.twsc-drag-handle{margin-right:8px;color:#555;cursor:grab;}' +
       '.twsc-progress-bar{width:100%;height:8px;background:#1a1a1a;border:1px solid #333;border-radius:4px;overflow:hidden;}' +
       '.twsc-progress-fill{height:100%;background:#4a6b3a;width:0%;transition:width 0.3s ease;}' +
+      '.twsc-train-link{color:#e0c882;text-decoration:none;font-weight:bold;font-size:11px;}' +
+      '.twsc-train-link:hover{color:#fff;text-decoration:underline;}' +
       '';
 
     var style = document.createElement('style');
