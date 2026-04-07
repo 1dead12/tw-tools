@@ -106,7 +106,6 @@
   var DEFAULT_SETTINGS = {
     includeArchers: false,
     nukeThreshold: 5000,
-    autoRefreshInterval: 0,
     exportFormat: 'bbcode'
   };
 
@@ -1364,14 +1363,6 @@
         '</select></label>' +
       '</div>' +
 
-      // Auto-refresh
-      '<div style="margin-bottom:6px;">' +
-        '<label>Auto-refresh interval (seconds, 0=off): ' +
-        '<input type="number" id="' + ID_PREFIX + 'set-refresh" value="' + settings.autoRefreshInterval +
-          '" style="width:60px;font-size:10px;" min="0" max="3600" step="30">' +
-        '</label>' +
-      '</div>' +
-
       // Actions
       '<div style="margin-top:12px;">' +
         '<button class="btn" id="' + ID_PREFIX + 'save-settings" style="font-weight:bold;">Save Settings</button> ' +
@@ -1394,7 +1385,6 @@
       settings.includeArchers = $panel.find('#' + ID_PREFIX + 'set-archers').is(':checked');
       settings.nukeThreshold = parseInt($panel.find('#' + ID_PREFIX + 'set-nuke').val(), 10) || 5000;
       settings.exportFormat = $panel.find('#' + ID_PREFIX + 'set-export').val();
-      settings.autoRefreshInterval = parseInt($panel.find('#' + ID_PREFIX + 'set-refresh').val(), 10) || 0;
       saveSettings();
 
       // Recalculate nuke status for existing data
@@ -1626,10 +1616,6 @@
         }
       },
       onClose: function() {
-        if (autoRefreshTimer) {
-          clearInterval(autoRefreshTimer);
-          autoRefreshTimer = null;
-        }
         TWTools.UI.toast('Troop Overview closed', 'success');
       }
     });
@@ -1657,50 +1643,6 @@
     // Settings tab — render immediately for lazy access
     renderSettings(card.getTabContent('settings'));
 
-    // Set up auto-refresh if configured
-    setupAutoRefresh(card);
-  }
-
-  /** @type {?number} Auto-refresh timer ID */
-  var autoRefreshTimer = null;
-
-  /**
-   * Set up auto-refresh interval based on settings.
-   * @param {Object} card - Card controller.
-   */
-  function setupAutoRefresh(card) {
-    if (autoRefreshTimer) {
-      clearInterval(autoRefreshTimer);
-      autoRefreshTimer = null;
-    }
-
-    if (settings.autoRefreshInterval > 0) {
-      autoRefreshTimer = setInterval(function() {
-        // Clear caches and re-fetch
-        TWTools.Storage.remove(STORAGE_PREFIX + 'troop_data_' + currentViewType);
-        TWTools.Storage.remove(STORAGE_PREFIX + 'command_data');
-
-        fetchTroopData(function(data) {
-          troopData = data;
-          recalculateNukeStatus();
-          // Re-render if troops tab is visible
-          var $panel = card.getTabContent('troops');
-          if ($panel.is(':visible')) {
-            renderTroops($panel, data);
-          }
-          card.setStatus('Auto-refreshed: ' + data.length + ' villages.');
-        }, null);
-
-        fetchCommandData(function(data) {
-          commandData = data;
-          var $panel = card.getTabContent('commands');
-          if ($panel.is(':visible')) {
-            renderCommands($panel, data);
-          }
-        }, null);
-
-      }, settings.autoRefreshInterval * 1000);
-    }
   }
 
   // ============================================================
