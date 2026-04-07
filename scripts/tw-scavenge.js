@@ -117,6 +117,18 @@
     /** @type {boolean[]} Selected tiers (0-indexed, tier 1-4). */
     selectedTiers: [true, true, true, true],
 
+    /** @type {boolean} Whether auto-train is enabled. */
+    trainEnabled: false,
+
+    /** @type {number} Target spear count per village. */
+    trainTargetSpear: 3000,
+
+    /** @type {number} Target light cavalry count per village. */
+    trainTargetLC: 1500,
+
+    /** @type {number} Minimum resource reserve per type (wood/clay/iron). */
+    trainResourceReserve: 5000,
+
     load: function() {
       this.unitTypes = Store.get('unitTypes', ['spear', 'sword', 'axe', 'light']);
       this.keepHome = Store.get('keepHome', {});
@@ -126,6 +138,10 @@
       this.defaultGroup = Store.get('defaultGroup', '0');
       this.distributionMode = Store.get('distributionMode', 'balanced');
       this.selectedTiers = Store.get('selectedTiers', [true, true, true, true]);
+      this.trainEnabled = Store.get('trainEnabled', false);
+      this.trainTargetSpear = Store.get('trainTargetSpear', 3000);
+      this.trainTargetLC = Store.get('trainTargetLC', 1500);
+      this.trainResourceReserve = Store.get('trainResourceReserve', 5000);
     },
 
     save: function() {
@@ -137,6 +153,10 @@
       Store.set('defaultGroup', this.defaultGroup);
       Store.set('distributionMode', this.distributionMode);
       Store.set('selectedTiers', this.selectedTiers);
+      Store.set('trainEnabled', this.trainEnabled);
+      Store.set('trainTargetSpear', this.trainTargetSpear);
+      Store.set('trainTargetLC', this.trainTargetLC);
+      Store.set('trainResourceReserve', this.trainResourceReserve);
     },
 
     /**
@@ -1094,23 +1114,15 @@
           }
         });
       } else {
-        // PRIORITY: Fill highest priority tier first up to target duration,
+        // PRIORITY: Fill highest priority tier first up to max duration,
         // then next tier with remaining troops, and so on.
+        // Tier 4 (highest loot_factor) gets filled first, then 3, 2, 1.
+        // allocateTroops naturally caps at available troops, so no Math.min needed.
         activeTiers.forEach(function(tierNum) {
           var params = tierParams[tierNum - 1];
           if (!params) return;
 
-          // Calculate total remaining capacity
-          var totalRemaining = 0;
-          unitTypes.forEach(function(u) {
-            totalRemaining += (remainingTroops[u] || 0) * (UNIT_HAUL[u] || 0);
-          });
-          if (totalRemaining <= 0) return;
-
-          // Cap at target duration
-          var maxCapForDuration = Calculator.requiredCapacity(targetDurationSec, params);
-          var targetCapacity = Math.min(totalRemaining, maxCapForDuration);
-
+          var targetCapacity = Calculator.requiredCapacity(targetDurationSec, params);
           var alloc = Calculator.allocateTroops(remainingTroops, targetCapacity, unitTypes);
 
           var actualCapacity = 0;
@@ -1309,6 +1321,298 @@
   };
 
   // ============================================================
+  // TRAINER (Auto-Train Spear + LC)
+  // ============================================================
+
+  /**
+   * Unit training costs per unit (wood, clay, iron, pop).
+   * @type {Object.<string, Object>}
+   */
+  var UNIT_COSTS = {
+    spear: { wood: 50, clay: 30, iron: 10, pop: 1 },
+    light: { wood: 125, clay: 100, iron: 250, pop: 4 }
+  };
+
+  /**
+   * Handles auto-training of spear fighters and light cavalry.
+   * Fetches barracks/stable pages, reads resources + queue, and POSTs train orders.
+   */
+  var Trainer = {
+    /** @private {boolean} Whether a training run is in progress. */
+    _running: false,
+
+    /** @private {number} Total villages to process. */
+    _total: 0,
+
+    /** @private {number} Villages processed so far. */
+    _processed: 0,
+
+    /** @private {Array} Collected results per village. */
+    _results: [],
+
+    /**
+     * Check if trainer is currently running.
+     * @returns {boolean}
+     */
+    isRunning: function() {
+      return this._running;
+    },
+
+    /**
+     * Run training for a list of villages (700+ points, checked).
+     * Processes villages sequentially to avoid rate limiting.
+     *
+     * @param {Array.<Object>} villages - Village objects with .id, .name, .troops.
+     * @param {function(Object)} onProgress - Progress callback ({ processed, total, village, result }).
+     * @param {function(Object)} onComplete - Completion callback ({ processed, total, results }).
+     */
+    run: function(villages, onProgress, onComplete) {
+      if (this._running) return;
+
+      this._running = true;
+      this._total = villages.length;
+      this._processed = 0;
+      this._results = [];
+
+      if (villages.length === 0) {
+        this._running = false;
+        onComplete({ processed: 0, total: 0, results: [] });
+        return;
+      }
+
+      var self = this;
+      var queue = villages.slice();
+
+      var processNext = function() {
+        if (queue.length === 0) {
+          self._running = false;
+          onComplete({
+            processed: self._processed,
+            total: self._total,
+            results: self._results
+          });
+          return;
+        }
+
+        var village = queue.shift();
+        self._trainVillage(village, function(result) {
+          self._processed++;
+          self._results.push(result);
+          onProgress({
+            processed: self._processed,
+            total: self._total,
+            village: village,
+            result: result
+          });
+          // 300ms delay between villages to avoid rate limiting
+          setTimeout(processNext, 300);
+        });
+      };
+
+      processNext();
+    },
+
+    /**
+     * Train spear + LC for a single village.
+     * Fetches barracks, queues spears, then fetches stable, queues LC.
+     *
+     * @private
+     * @param {Object} village - Village object with .id, .name, .troops.
+     * @param {function(Object)} callback - Called with result object.
+     */
+    _trainVillage: function(village, callback) {
+      var self = this;
+      var result = {
+        villageId: village.id,
+        villageName: village.name,
+        spearQueued: 0,
+        lcQueued: 0,
+        spearError: null,
+        lcError: null
+      };
+
+      var currentSpear = (village.troops && village.troops.spear) || 0;
+      var currentLC = (village.troops && village.troops.light) || 0;
+      var targetSpear = Settings.trainTargetSpear;
+      var targetLC = Settings.trainTargetLC;
+      var reserve = Settings.trainResourceReserve;
+
+      var needSpear = Math.max(0, targetSpear - currentSpear);
+      var needLC = Math.max(0, targetLC - currentLC);
+
+      // Step 1: Train spears via barracks
+      if (needSpear > 0) {
+        self._fetchAndTrain(village.id, 'barracks', 'spear', needSpear, reserve, function(queued, err) {
+          result.spearQueued = queued;
+          result.spearError = err;
+
+          // Step 2: Train LC via stable
+          if (needLC > 0) {
+            // Small delay between barracks and stable requests
+            setTimeout(function() {
+              self._fetchAndTrain(village.id, 'stable', 'light', needLC, reserve, function(lcQueued, lcErr) {
+                result.lcQueued = lcQueued;
+                result.lcError = lcErr;
+                callback(result);
+              });
+            }, 200);
+          } else {
+            callback(result);
+          }
+        });
+      } else if (needLC > 0) {
+        self._fetchAndTrain(village.id, 'stable', 'light', needLC, reserve, function(lcQueued, lcErr) {
+          result.lcQueued = lcQueued;
+          result.lcError = lcErr;
+          callback(result);
+        });
+      } else {
+        // Nothing needed
+        callback(result);
+      }
+    },
+
+    /**
+     * Fetch a building page (barracks/stable) and POST a train order.
+     *
+     * @private
+     * @param {number} villageId - Village ID.
+     * @param {string} screen - Building screen name ('barracks' or 'stable').
+     * @param {string} unitType - Unit type to train ('spear' or 'light').
+     * @param {number} desired - Number of units desired.
+     * @param {number} reserve - Resource reserve to keep.
+     * @param {function(number, string|null)} callback - Called with (queued count, error or null).
+     */
+    _fetchAndTrain: function(villageId, screen, unitType, desired, reserve, callback) {
+      var fetchUrl = '/game.php?village=' + villageId + '&screen=' + screen;
+
+      $.ajax({
+        url: fetchUrl,
+        dataType: 'html',
+        success: function(html) {
+          // Parse resources from the page
+          var resources = Trainer._parseResources(html);
+          if (!resources) {
+            callback(0, 'Could not parse resources');
+            return;
+          }
+
+          // Calculate max trainable based on resources and reserve
+          var costs = UNIT_COSTS[unitType];
+          if (!costs) {
+            callback(0, 'Unknown unit type');
+            return;
+          }
+
+          var availWood = Math.max(0, resources.wood - reserve);
+          var availClay = Math.max(0, resources.clay - reserve);
+          var availIron = Math.max(0, resources.iron - reserve);
+
+          var maxByWood = costs.wood > 0 ? Math.floor(availWood / costs.wood) : Infinity;
+          var maxByClay = costs.clay > 0 ? Math.floor(availClay / costs.clay) : Infinity;
+          var maxByIron = costs.iron > 0 ? Math.floor(availIron / costs.iron) : Infinity;
+          var maxByRes = Math.min(maxByWood, maxByClay, maxByIron);
+
+          if (maxByRes <= 0) {
+            callback(0, 'Insufficient resources (reserve=' + reserve + ')');
+            return;
+          }
+
+          var toTrain = Math.min(desired, maxByRes);
+          if (toTrain <= 0) {
+            callback(0, null);
+            return;
+          }
+
+          // POST the train order
+          var csrf = (typeof game_data !== 'undefined') ? game_data.csrf : '';
+          var trainUrl = '/game.php?village=' + villageId +
+                         '&screen=' + screen +
+                         '&ajaxaction=train&mode=train&h=' + encodeURIComponent(csrf);
+
+          var units = {};
+          units[unitType] = toTrain;
+
+          $.ajax({
+            url: trainUrl,
+            type: 'POST',
+            dataType: 'json',
+            contentType: 'application/x-www-form-urlencoded; charset=UTF-8',
+            data: $.param({ units: units }),
+            success: function(resp) {
+              if (resp && !resp.error) {
+                console.log('[TW-Scavenge/Train] Queued ' + toTrain + ' ' + unitType + ' in village ' + villageId);
+                callback(toTrain, null);
+              } else {
+                var errMsg = (resp && resp.error) ? resp.error : 'Unknown error';
+                console.log('[TW-Scavenge/Train] Error for village ' + villageId + ': ' + errMsg);
+                callback(0, errMsg);
+              }
+            },
+            error: function(xhr) {
+              console.log('[TW-Scavenge/Train] HTTP error for village ' + villageId + ': ' + xhr.status);
+              callback(0, 'HTTP ' + xhr.status);
+            }
+          });
+        },
+        error: function(xhr) {
+          callback(0, 'Failed to fetch ' + screen + ' page: HTTP ' + xhr.status);
+        }
+      });
+    },
+
+    /**
+     * Parse resource values from a building page HTML.
+     * Looks for the standard TW resource bar (#wood, #stone, #iron) or
+     * inline JavaScript game_data resource values.
+     *
+     * @private
+     * @param {string} html - Raw HTML of the building page.
+     * @returns {?{wood: number, clay: number, iron: number}} Parsed resources or null.
+     */
+    _parseResources: function(html) {
+      // Method 1: Parse from inline game_data or resource variables in script tags
+      var woodMatch = html.match(/id="wood"\s*[^>]*>[\s]*([\d.]+)/);
+      var clayMatch = html.match(/id="stone"\s*[^>]*>[\s]*([\d.]+)/);
+      var ironMatch = html.match(/id="iron"\s*[^>]*>[\s]*([\d.]+)/);
+
+      if (woodMatch && clayMatch && ironMatch) {
+        return {
+          wood: parseInt(woodMatch[1].replace(/\./g, ''), 10) || 0,
+          clay: parseInt(clayMatch[1].replace(/\./g, ''), 10) || 0,
+          iron: parseInt(ironMatch[1].replace(/\./g, ''), 10) || 0
+        };
+      }
+
+      // Method 2: Try reading from the live DOM (current page resources)
+      if (typeof game_data !== 'undefined' && game_data.village) {
+        var gv = game_data.village;
+        if (gv.wood !== undefined && gv.stone !== undefined && gv.iron !== undefined) {
+          return {
+            wood: parseInt(gv.wood, 10) || 0,
+            clay: parseInt(gv.stone, 10) || 0,
+            iron: parseInt(gv.iron, 10) || 0
+          };
+        }
+      }
+
+      // Method 3: Parse from resource spans on current page
+      var $wood = $('#wood');
+      var $stone = $('#stone');
+      var $iron = $('#iron');
+      if ($wood.length && $stone.length && $iron.length) {
+        return {
+          wood: parseInt($wood.text().replace(/\./g, ''), 10) || 0,
+          clay: parseInt($stone.text().replace(/\./g, ''), 10) || 0,
+          iron: parseInt($iron.text().replace(/\./g, ''), 10) || 0
+        };
+      }
+
+      return null;
+    }
+  };
+
+  // ============================================================
   // APPLICATION STATE
   // ============================================================
 
@@ -1320,7 +1624,8 @@
     tierParams: DEFAULT_TIER_PARAMS,
     durationSec: 8 * 3600,
     sendInProgress: false,
-    lastResult: null
+    lastResult: null,
+    trainResult: null
   };
 
   // ============================================================
@@ -1896,6 +2201,99 @@
       html += '</select></div>';
       html += '</div></div>';
 
+      // Training section
+      html += '<div class="twsc-section">';
+      html += '<div class="twsc-section-title">Training (Spear + Light Cavalry)</div>';
+      html += '<div style="display:flex;gap:16px;margin-top:8px;flex-wrap:wrap;align-items:center;">';
+
+      // Enable checkbox
+      html += '<label class="twsc-radio">';
+      html += '<input type="checkbox" id="' + ID_PREFIX + 'train-enabled"' +
+              (Settings.trainEnabled ? ' checked' : '') + '> Auto-Train Enabled';
+      html += '</label>';
+      html += '</div>';
+
+      // Targets + reserve
+      html += '<div style="display:flex;gap:16px;margin-top:8px;flex-wrap:wrap;">';
+      html += '<div><label style="font-size:11px;color:#a89050;">Target Spear / village:</label><br>';
+      html += '<input type="number" class="twsc-input" id="' + ID_PREFIX + 'train-spear" value="' +
+              Settings.trainTargetSpear + '" min="0" step="100" style="width:80px;"></div>';
+      html += '<div><label style="font-size:11px;color:#a89050;">Target LC / village:</label><br>';
+      html += '<input type="number" class="twsc-input" id="' + ID_PREFIX + 'train-lc" value="' +
+              Settings.trainTargetLC + '" min="0" step="100" style="width:80px;"></div>';
+      html += '<div><label style="font-size:11px;color:#a89050;">Resource Reserve:</label><br>';
+      html += '<input type="number" class="twsc-input" id="' + ID_PREFIX + 'train-reserve" value="' +
+              Settings.trainResourceReserve + '" min="0" step="1000" style="width:80px;"></div>';
+      html += '</div>';
+
+      // Current troop counts for checked villages (700+ pts)
+      var trainVillages = AppState.villages.filter(function(v) { return v.checked; });
+      if (trainVillages.length > 0) {
+        html += '<div style="margin-top:8px;max-height:150px;overflow-y:auto;border:1px solid #333;border-radius:4px;">';
+        html += '<table class="twsc-table twsc-table-sm"><thead><tr>';
+        html += '<th>Village</th>';
+        html += '<th>Spear</th>';
+        html += '<th>Target</th>';
+        html += '<th>LC</th>';
+        html += '<th>Target</th>';
+        html += '</tr></thead><tbody>';
+
+        trainVillages.forEach(function(v) {
+          var curSpear = (v.troops && v.troops.spear) || 0;
+          var curLC = (v.troops && v.troops.light) || 0;
+          var spearColor = curSpear >= Settings.trainTargetSpear ? '#4caf50' : '#f44336';
+          var lcColor = curLC >= Settings.trainTargetLC ? '#4caf50' : '#f44336';
+
+          html += '<tr>';
+          html += '<td>' + UI._esc(v.name || 'Village ' + v.id) + '</td>';
+          html += '<td style="color:' + spearColor + ';">' + curSpear + '</td>';
+          html += '<td>' + Settings.trainTargetSpear + '</td>';
+          html += '<td style="color:' + lcColor + ';">' + curLC + '</td>';
+          html += '<td>' + Settings.trainTargetLC + '</td>';
+          html += '</tr>';
+        });
+
+        html += '</tbody></table></div>';
+      } else {
+        html += '<div style="margin-top:8px;font-size:12px;color:#555;">Select villages on the Scavenge tab to see troop counts.</div>';
+      }
+
+      // Train button
+      html += '<div style="margin-top:8px;display:flex;gap:8px;align-items:center;">';
+      html += '<button class="twsc-btn twsc-btn-primary" id="' + ID_PREFIX + 'train-btn"' +
+              (Trainer.isRunning() ? ' disabled' : '') + '>' +
+              (Trainer.isRunning() ? 'Training...' : 'Train Selected Villages') + '</button>';
+      html += '<span id="' + ID_PREFIX + 'train-status" style="font-size:11px;color:#a89050;"></span>';
+      html += '</div>';
+
+      // Training progress bar (hidden initially)
+      html += '<div id="' + ID_PREFIX + 'train-progress" style="display:none;margin-top:8px;">';
+      html += '<div class="twsc-progress-bar"><div class="twsc-progress-fill" id="' + ID_PREFIX + 'train-progress-fill"></div></div>';
+      html += '<div id="' + ID_PREFIX + 'train-progress-text" style="font-size:11px;color:#8a8070;text-align:center;margin-top:4px;"></div>';
+      html += '</div>';
+
+      // Training result
+      if (AppState.trainResult) {
+        var tr = AppState.trainResult;
+        var totalSpear = 0;
+        var totalLC = 0;
+        var trainErrors = 0;
+        tr.results.forEach(function(r) {
+          totalSpear += r.spearQueued;
+          totalLC += r.lcQueued;
+          if (r.spearError || r.lcError) trainErrors++;
+        });
+        html += '<div style="margin-top:8px;padding:8px 12px;border-radius:4px;' +
+                'background:rgba(76,175,80,0.1);border-left:3px solid #4caf50;font-size:12px;">';
+        html += 'Trained: ' + totalSpear + ' spear, ' + totalLC + ' LC across ' + tr.processed + ' villages';
+        if (trainErrors > 0) {
+          html += ' | <span style="color:#f44336;">Errors in ' + trainErrors + ' village(s)</span>';
+        }
+        html += '</div>';
+      }
+
+      html += '</div>';
+
       // Save button
       html += '<div style="text-align:right;margin-top:12px;">';
       html += '<button class="twsc-btn twsc-btn-primary" id="' + ID_PREFIX + 'save-settings">Save Settings</button>';
@@ -1949,6 +2347,11 @@
         }
       });
 
+      // Train button
+      $(document).off('click.' + ID_PREFIX + 'tr').on('click.' + ID_PREFIX + 'tr', '#' + ID_PREFIX + 'train-btn', function() {
+        self._handleTrain();
+      });
+
       // Save settings button
       $(document).off('click.' + ID_PREFIX + 'ss').on('click.' + ID_PREFIX + 'ss', '#' + ID_PREFIX + 'save-settings', function() {
         // Read unit type checkboxes
@@ -1987,9 +2390,83 @@
         // Read default group
         Settings.defaultGroup = $('#' + ID_PREFIX + 'default-group').val();
 
+        // Read training settings
+        Settings.trainEnabled = $('#' + ID_PREFIX + 'train-enabled').is(':checked');
+        Settings.trainTargetSpear = parseInt($('#' + ID_PREFIX + 'train-spear').val(), 10) || 0;
+        Settings.trainTargetLC = parseInt($('#' + ID_PREFIX + 'train-lc').val(), 10) || 0;
+        Settings.trainResourceReserve = parseInt($('#' + ID_PREFIX + 'train-reserve').val(), 10) || 0;
+
         Settings.save();
         TWTools.UI.toast('Settings saved', 'success');
       });
+    },
+
+    /**
+     * Handle the Train button click.
+     * Reads current training settings from inputs, saves them, then runs
+     * the trainer for all checked villages.
+     * @private
+     */
+    _handleTrain: function() {
+      if (Trainer.isRunning()) return;
+
+      // Read and save training settings from current inputs before running
+      Settings.trainEnabled = $('#' + ID_PREFIX + 'train-enabled').is(':checked');
+      Settings.trainTargetSpear = parseInt($('#' + ID_PREFIX + 'train-spear').val(), 10) || 0;
+      Settings.trainTargetLC = parseInt($('#' + ID_PREFIX + 'train-lc').val(), 10) || 0;
+      Settings.trainResourceReserve = parseInt($('#' + ID_PREFIX + 'train-reserve').val(), 10) || 0;
+      Settings.save();
+
+      // Filter checked villages that need training
+      var checkedVillages = AppState.villages.filter(function(v) { return v.checked; });
+      if (checkedVillages.length === 0) {
+        TWTools.UI.toast('No villages selected — select villages on the Scavenge tab', 'warning');
+        return;
+      }
+
+      // Filter to villages that actually need training
+      var toTrain = checkedVillages.filter(function(v) {
+        var curSpear = (v.troops && v.troops.spear) || 0;
+        var curLC = (v.troops && v.troops.light) || 0;
+        return curSpear < Settings.trainTargetSpear || curLC < Settings.trainTargetLC;
+      });
+
+      if (toTrain.length === 0) {
+        TWTools.UI.toast('All selected villages already meet targets', 'success');
+        return;
+      }
+
+      // Show progress
+      $('#' + ID_PREFIX + 'train-progress').show();
+      $('#' + ID_PREFIX + 'train-btn').prop('disabled', true).text('Training...');
+      AppState.trainResult = null;
+
+      var self = this;
+      Trainer.run(
+        toTrain,
+        function onProgress(progress) {
+          var pct = Math.round((progress.processed / progress.total) * 100);
+          $('#' + ID_PREFIX + 'train-progress-fill').css('width', pct + '%');
+          var statusParts = [progress.processed + '/' + progress.total + ' villages'];
+          if (progress.result.spearQueued > 0) statusParts.push('+' + progress.result.spearQueued + ' spear');
+          if (progress.result.lcQueued > 0) statusParts.push('+' + progress.result.lcQueued + ' LC');
+          $('#' + ID_PREFIX + 'train-progress-text').text(statusParts.join(' | '));
+        },
+        function onComplete(result) {
+          AppState.trainResult = result;
+          var totalSpear = 0;
+          var totalLC = 0;
+          result.results.forEach(function(r) {
+            totalSpear += r.spearQueued;
+            totalLC += r.lcQueued;
+          });
+          TWTools.UI.toast(
+            'Training complete: ' + totalSpear + ' spear + ' + totalLC + ' LC queued',
+            'success'
+          );
+          self.renderSettingsTab();
+        }
+      );
     },
 
     // ----------------------------------------------------------
