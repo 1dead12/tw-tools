@@ -2,7 +2,7 @@
   'use strict';
 
   // ============================================================
-  // TW ATTACK PLANNER v1.0.0
+  // TW ATTACK PLANNER v2.0.0
   // ============================================================
   // Coordinate timed attacks from multiple villages to single or
   // multiple targets. Calculates launch times, live countdowns,
@@ -17,7 +17,7 @@
     throw new Error('tw-planner.js requires tw-core.js and tw-ui.js');
   }
 
-  var VERSION = '1.0.0';
+  var VERSION = '2.0.0';
   var ID_PREFIX = 'twp-';
   var STORAGE_PREFIX = 'twp_';
 
@@ -166,6 +166,9 @@
     /** @type {number} Max distance filter for fakes (fields). */
     fakeMaxDistance: 50,
 
+    /** @type {number} Default village group ID (0 = all). */
+    defaultGroupId: 0,
+
     /**
      * Load settings from localStorage.
      */
@@ -180,6 +183,7 @@
         this.alertRepeat = saved.alertRepeat || 3;
         this.autoSort = saved.autoSort !== false;
         this.fakeMaxDistance = saved.fakeMaxDistance || 50;
+        this.defaultGroupId = saved.defaultGroupId || 0;
       }
     },
 
@@ -195,8 +199,24 @@
         soundEnabled: this.soundEnabled,
         alertRepeat: this.alertRepeat,
         autoSort: this.autoSort,
-        fakeMaxDistance: this.fakeMaxDistance
+        fakeMaxDistance: this.fakeMaxDistance,
+        defaultGroupId: this.defaultGroupId
       });
+    },
+
+    /**
+     * Reset all settings to defaults.
+     */
+    reset: function() {
+      this.defaultUnit = 'ram';
+      this.fakeSpyCount = 1;
+      this.fakeCatCount = 1;
+      this.alertSeconds = 30;
+      this.soundEnabled = true;
+      this.autoSort = true;
+      this.fakeMaxDistance = 50;
+      this.defaultGroupId = 0;
+      this.save();
     }
   };
 
@@ -255,6 +275,18 @@
   /** @type {Array.<FakeEntry>} Current fake plan list. */
   var fakeEntries = [];
 
+  /** @type {Object.<number, {total: number, knight: number}>} Troop data per village ID. */
+  var villageTroops = {};
+
+  /** @type {Array.<{id: number, name: string}>} Village groups from TW. */
+  var villageGroups = [];
+
+  /** @type {Object.<number, Array.<number>>} Map of group ID -> village IDs. */
+  var groupVillages = {};
+
+  /** @type {Object.<number, boolean>} Tracks which groups have been fetched. */
+  var groupsFetched = {};
+
   /** @type {?Object} Card controller reference. */
   var card = null;
 
@@ -289,6 +321,11 @@
         unitInfo = units;
         TWTools.DataFetcher.fetchPlayerVillages(function(villages) {
           playerVillages = villages;
+          // Sort villages alphabetically by name
+          playerVillages.sort(function(a, b) {
+            return (a.name || '').localeCompare(b.name || '');
+          });
+          loadVillageGroups();
           createUI();
           startUpdates();
           TWTools.UI.toast('Attack Planner loaded (' + playerVillages.length + ' villages)', 'success');
@@ -328,6 +365,238 @@
     buildSettingsTab();
 
     card.setStatus('Villages: ' + playerVillages.length + ' | Ready');
+  }
+
+  // ============================================================
+  // VILLAGE GROUPS
+  // ============================================================
+
+  /**
+   * Load village groups from TW game_data or DOM.
+   */
+  function loadVillageGroups() {
+    villageGroups = [];
+    try {
+      if (typeof game_data !== 'undefined' && game_data.groups) {
+        var groups = game_data.groups;
+        for (var gid in groups) {
+          if (groups.hasOwnProperty(gid)) {
+            var name = typeof groups[gid] === 'string' ? groups[gid] :
+              (groups[gid].name || 'Group ' + gid);
+            villageGroups.push({ id: parseInt(gid, 10), name: name });
+          }
+        }
+      }
+    } catch (e) {}
+
+    // Fallback: try DOM group selector
+    if (villageGroups.length === 0) {
+      var $select = $('#group_id, select[name="group_id"]');
+      if ($select.length > 0) {
+        $select.find('option').each(function() {
+          var val = parseInt($(this).val(), 10);
+          if (val > 0) {
+            villageGroups.push({ id: val, name: $(this).text().trim() });
+          }
+        });
+      }
+    }
+
+    // Sort groups alphabetically
+    villageGroups.sort(function(a, b) {
+      return a.name.localeCompare(b.name);
+    });
+  }
+
+  /**
+   * Fetch village IDs belonging to a group via overview page.
+   * @param {number} groupId - Group ID to fetch.
+   * @param {function} callback - Called when done.
+   */
+  function fetchGroupVillages(groupId, callback) {
+    if (groupsFetched[groupId]) {
+      callback(groupVillages[groupId] || []);
+      return;
+    }
+
+    // Check localStorage cache first
+    var cacheKey = STORAGE_PREFIX + 'group_' + groupId;
+    var cached = TWTools.Storage.get(cacheKey);
+    if (cached) {
+      groupVillages[groupId] = cached;
+      groupsFetched[groupId] = true;
+      callback(cached);
+      return;
+    }
+
+    $.ajax({
+      url: '/game.php?screen=overview_villages&mode=combined&group=' + groupId + '&page=-1',
+      dataType: 'html',
+      success: function(html) {
+        var ids = [];
+        var $doc = $('<div/>').html(html);
+        $doc.find('a[href*="village="]').each(function() {
+          var href = $(this).attr('href') || '';
+          var match = href.match(/village=(\d+)/);
+          if (match) {
+            var vid = parseInt(match[1], 10);
+            if (ids.indexOf(vid) === -1) {
+              ids.push(vid);
+            }
+          }
+        });
+        groupVillages[groupId] = ids;
+        groupsFetched[groupId] = true;
+        TWTools.Storage.set(cacheKey, ids, 600000); // 10 min cache
+        callback(ids);
+      },
+      error: function() {
+        groupVillages[groupId] = [];
+        groupsFetched[groupId] = true;
+        callback([]);
+      }
+    });
+  }
+
+  // ============================================================
+  // TROOP DATA
+  // ============================================================
+
+  /** @type {boolean} Whether troop fetch is in progress. */
+  var troopFetchInProgress = false;
+
+  /**
+   * Fetch troop overview data from the combined overview page.
+   * Populates villageTroops map with {total, knight} per village ID.
+   * @param {function} callback - Called when done.
+   */
+  function fetchTroopOverview(callback) {
+    if (troopFetchInProgress) {
+      TWTools.UI.toast('Already fetching army data...', 'warning');
+      return;
+    }
+
+    // Check cache
+    var cached = TWTools.Storage.get(STORAGE_PREFIX + 'troop_data');
+    if (cached) {
+      villageTroops = cached;
+      callback();
+      return;
+    }
+
+    troopFetchInProgress = true;
+    card.setStatus('Fetching army data...');
+    var allData = {};
+    var page = 0;
+
+    function fetchPage() {
+      var url = '/game.php?screen=overview_villages&mode=combined&type=own_home&page=' + page;
+      $.ajax({
+        url: url,
+        dataType: 'html',
+        timeout: 15000,
+        success: function(html) {
+          var result = parseTroopPage(html);
+          for (var vid in result.troops) {
+            if (result.troops.hasOwnProperty(vid)) {
+              allData[vid] = result.troops[vid];
+            }
+          }
+          card.setStatus('Army data: page ' + (page + 1) + ' (' + Object.keys(allData).length + ' villages)...');
+
+          if (result.hasNextPage) {
+            page++;
+            setTimeout(fetchPage, 200);
+          } else {
+            troopFetchInProgress = false;
+            villageTroops = allData;
+            TWTools.Storage.set(STORAGE_PREFIX + 'troop_data', allData, 300000); // 5 min cache
+            card.setStatus('Villages: ' + playerVillages.length + ' | Army data loaded');
+            callback();
+          }
+        },
+        error: function() {
+          troopFetchInProgress = false;
+          card.setStatus('Army data fetch failed');
+          callback();
+        }
+      });
+    }
+
+    fetchPage();
+  }
+
+  /**
+   * Parse a combined overview page for troop counts.
+   * @param {string} html - Raw HTML page.
+   * @returns {{troops: Object, hasNextPage: boolean}}
+   */
+  function parseTroopPage(html) {
+    var $doc = $('<div/>').html(html);
+    var troops = {};
+
+    // Find the unit column headers to map indices
+    var unitColumns = {};
+    var $table = $doc.find('#combined_table, table.vis.overview_table');
+    if ($table.length === 0) {
+      $table = $doc.find('table.vis').filter(function() {
+        return $(this).find('tr').length > 2;
+      }).first();
+    }
+
+    if ($table.length > 0) {
+      // Parse header images to identify unit columns
+      $table.find('thead th, tr:first th, tr:first td').each(function(idx) {
+        var $img = $(this).find('img');
+        if ($img.length > 0) {
+          var src = $img.attr('src') || '';
+          var unitNames = Object.keys(UNIT_NAMES);
+          for (var u = 0; u < unitNames.length; u++) {
+            if (src.indexOf('unit_' + unitNames[u]) !== -1) {
+              unitColumns[unitNames[u]] = idx;
+              break;
+            }
+          }
+        }
+      });
+
+      // Parse data rows
+      $table.find('tbody tr, tr').not(':first').each(function() {
+        var $row = $(this);
+        var $cells = $row.find('td');
+        if ($cells.length < 3) return;
+
+        var $link = $row.find('a[href*="village="]').first();
+        if ($link.length === 0) return;
+
+        var href = $link.attr('href') || '';
+        var vidMatch = href.match(/village=(\d+)/);
+        if (!vidMatch) return;
+
+        var vid = parseInt(vidMatch[1], 10);
+        var total = 0;
+        var knightCount = 0;
+
+        for (var unitType in unitColumns) {
+          if (unitColumns.hasOwnProperty(unitType)) {
+            var cellText = $cells.eq(unitColumns[unitType]).text();
+            var count = parseInt(cellText.replace(/[^0-9]/g, ''), 10) || 0;
+            total += count;
+            if (unitType === 'knight') {
+              knightCount = count;
+            }
+          }
+        }
+
+        troops[vid] = { total: total, knight: knightCount };
+      });
+    }
+
+    // Check for next page link
+    var hasNextPage = $doc.find('a.paged-nav-item[href*="page="]').last().length > 0 &&
+      $doc.find('a.paged-nav-item').last().text().trim() === '>>';
+
+    return { troops: troops, hasNextPage: hasNextPage };
   }
 
   // ============================================================
@@ -372,18 +641,25 @@
 
       // Source village filter
       '  <div style="margin-bottom:4px;">',
+      '    <select id="' + ID_PREFIX + 'village-group" style="font-size:11px;">',
+      '      <option value="0">All villages</option>',
+      buildGroupOptions(),
+      '    </select>',
       '    <input type="text" id="' + ID_PREFIX + 'village-filter" ',
-      '      placeholder="Filter villages..." style="width:200px;font-size:11px;" />',
+      '      placeholder="Filter villages..." style="width:150px;font-size:11px;margin-left:4px;" />',
       '    <label style="margin-left:8px;font-size:10px;">',
       '      <input type="checkbox" id="' + ID_PREFIX + 'select-all" /> Select all',
       '    </label>',
+      '    <button class="btn" id="' + ID_PREFIX + 'load-army" ',
+      '      style="font-size:9px;margin-left:8px;" title="Fetch army + paladin data from overview">',
+      '      Load Army</button>',
       '  </div>',
 
       // Source village table
       '  <div style="max-height:150px;overflow-y:auto;border:1px solid #c0a060;margin-bottom:6px;">',
       '    <table class="vis" id="' + ID_PREFIX + 'village-table" style="width:100%;">',
       '      <thead>',
-      '        <tr><th></th><th>Village</th><th>Coords</th><th>Points</th></tr>',
+      '        <tr><th></th><th>Village</th><th>Coords</th><th>Points</th><th>Army</th><th>Pala</th></tr>',
       '      </thead>',
       '      <tbody>',
       buildVillageRows(),
@@ -413,8 +689,11 @@
 
     $panel.html(html);
 
-    // Set default unit type
+    // Set default unit type and village group
     $('#' + ID_PREFIX + 'unit-type').val(Settings.defaultUnit);
+    if (Settings.defaultGroupId > 0) {
+      $('#' + ID_PREFIX + 'village-group').val(Settings.defaultGroupId);
+    }
 
     // Bind events
     $('#' + ID_PREFIX + 'add-plan').on('click', onAddPlan);
@@ -422,6 +701,16 @@
     $('#' + ID_PREFIX + 'clear-plans').on('click', onClearPlans);
     $('#' + ID_PREFIX + 'select-all').on('change', onSelectAll);
     $('#' + ID_PREFIX + 'village-filter').on('input', onFilterVillages);
+    $('#' + ID_PREFIX + 'village-group').on('change', onGroupChange);
+    $('#' + ID_PREFIX + 'load-army').on('click', function() {
+      fetchTroopOverview(function() {
+        // Rebuild village rows with army data
+        var $tbody = $('#' + ID_PREFIX + 'village-table tbody');
+        $tbody.html(buildVillageRows());
+        applyVillageFilters();
+        TWTools.UI.toast('Army data loaded for ' + Object.keys(villageTroops).length + ' villages', 'success');
+      });
+    });
 
     // Render saved plans
     renderAllPlans();
@@ -442,6 +731,19 @@
   }
 
   /**
+   * Build <option> tags for the village group dropdown.
+   * @returns {string} HTML option tags.
+   */
+  function buildGroupOptions() {
+    var opts = '';
+    for (var i = 0; i < villageGroups.length; i++) {
+      var g = villageGroups[i];
+      opts += '<option value="' + g.id + '">' + escapeHtml(g.name) + '</option>';
+    }
+    return opts;
+  }
+
+  /**
    * Build village table rows with checkboxes.
    * @returns {string} HTML table rows.
    */
@@ -450,13 +752,19 @@
     for (var i = 0; i < playerVillages.length; i++) {
       var v = playerVillages[i];
       var coords = v.x + '|' + v.y;
+      var troopInfo = villageTroops[v.id];
+      var armyText = troopInfo ? String(troopInfo.total) : '-';
+      var palaText = troopInfo ? (troopInfo.knight > 0 ? 'Yes' : 'No') : '-';
+      var palaColor = troopInfo ? (troopInfo.knight > 0 ? '#2a8a2a' : '#a02020') : '#999';
       rows += '<tr class="' + ID_PREFIX + 'village-row" data-coords="' + coords + '" ' +
-        'data-name="' + (v.name || '').toLowerCase() + '">' +
+        'data-name="' + (v.name || '').toLowerCase() + '" data-village-id="' + v.id + '">' +
         '<td><input type="checkbox" class="' + ID_PREFIX + 'village-cb" ' +
         'data-village-idx="' + i + '" /></td>' +
         '<td style="font-size:10px;">' + escapeHtml(v.name) + '</td>' +
         '<td style="font-family:monospace;font-size:10px;">' + coords + '</td>' +
         '<td style="text-align:right;font-size:10px;">' + (v.points || 0) + '</td>' +
+        '<td style="text-align:right;font-size:10px;">' + armyText + '</td>' +
+        '<td style="text-align:center;font-size:10px;color:' + palaColor + ';">' + palaText + '</td>' +
         '</tr>';
     }
     return rows;
@@ -587,7 +895,10 @@
         '<div style="background:#e8d8a8;padding:3px 6px;margin:4px 0 2px 0;' +
         'border:1px solid #c0a060;display:flex;justify-content:space-between;align-items:center;">' +
         '<span style="font-weight:bold;font-size:10px;">Target: ' +
-        escapeHtml(pl.targetCoords) + ' | Landing: ' + landDisplay + landTimeDisplay + '</span>' +
+        escapeHtml(pl.targetCoords) + ' | Landing: ' +
+        '<span class="' + ID_PREFIX + 'edit-landing" data-plan-idx="' + pi + '" ' +
+        'style="cursor:pointer;text-decoration:underline;color:#3a6a1a;" title="Click to edit landing time">' +
+        landDisplay + landTimeDisplay + '</span></span>' +
         '<span class="' + ID_PREFIX + 'del-plan" data-plan-idx="' + pi + '" ' +
         'style="cursor:pointer;color:#a02020;font-weight:bold;font-size:12px;" title="Delete plan">X</span>' +
         '</div>'
@@ -604,6 +915,95 @@
       TWTools.UI.toast('Plan removed', 'warning');
     });
 
+    // Bind single attack deletion
+    $container.off('click', '.' + ID_PREFIX + 'del-attack');
+    $container.on('click', '.' + ID_PREFIX + 'del-attack', function() {
+      var planIdx = parseInt($(this).attr('data-plan'), 10);
+      var atkIdx = parseInt($(this).attr('data-atk'), 10);
+      if (plans[planIdx]) {
+        plans[planIdx].attacks.splice(atkIdx, 1);
+        if (plans[planIdx].attacks.length === 0) {
+          plans.splice(planIdx, 1);
+        }
+        savePlans();
+        renderAllPlans();
+        TWTools.UI.toast('Attack removed', 'warning');
+      }
+    });
+
+    // Bind landing time editing
+    $container.off('click', '.' + ID_PREFIX + 'edit-landing');
+    $container.on('click', '.' + ID_PREFIX + 'edit-landing', function() {
+      var $span = $(this);
+      var idx = parseInt($span.attr('data-plan-idx'), 10);
+      var plan = plans[idx];
+      if (!plan) return;
+
+      var curTimeStr = TWTools.formatTime(plan.landingTimeMs % 86400000);
+      var curDay = plan.landingTomorrow ? 'tomorrow' : 'today';
+      $span.replaceWith(
+        '<select class="' + ID_PREFIX + 'edit-day" style="font-size:10px;">' +
+        '<option value="today"' + (curDay === 'today' ? ' selected' : '') + '>Today</option>' +
+        '<option value="tomorrow"' + (curDay === 'tomorrow' ? ' selected' : '') + '>Tomorrow</option>' +
+        '</select> ' +
+        '<input type="text" class="' + ID_PREFIX + 'edit-time" value="' + curTimeStr + '" ' +
+        'style="width:110px;font-size:10px;font-family:monospace;" /> ' +
+        '<button class="btn ' + ID_PREFIX + 'save-landing" data-plan-idx="' + idx + '" ' +
+        'style="font-size:9px;">Save</button> ' +
+        '<button class="btn ' + ID_PREFIX + 'cancel-landing" data-plan-idx="' + idx + '" ' +
+        'style="font-size:9px;">Cancel</button>'
+      );
+    });
+
+    $container.off('click', '.' + ID_PREFIX + 'cancel-landing');
+    $container.on('click', '.' + ID_PREFIX + 'cancel-landing', function() {
+      renderAllPlans();
+    });
+
+    $container.off('click', '.' + ID_PREFIX + 'save-landing');
+    $container.on('click', '.' + ID_PREFIX + 'save-landing', function() {
+      var idx = parseInt($(this).attr('data-plan-idx'), 10);
+      var plan = plans[idx];
+      if (!plan) return;
+
+      var $parent = $(this).parent();
+      var newDay = $parent.find('.' + ID_PREFIX + 'edit-day').val();
+      var newTimeStr = $parent.find('.' + ID_PREFIX + 'edit-time').val().trim();
+      var newLandingMs = TWTools.parseTimeToMs(newTimeStr);
+      if (isNaN(newLandingMs)) {
+        TWTools.UI.toast('Invalid time format (HH:MM:SS:mmm)', 'error');
+        return;
+      }
+      if (newDay === 'tomorrow') {
+        newLandingMs += 86400000;
+      }
+
+      plan.landingTimeMs = newLandingMs;
+      plan.landingTomorrow = (newDay === 'tomorrow');
+
+      var targetCoords = TWTools.parseCoords(plan.targetCoords);
+      for (var a = 0; a < plan.attacks.length; a++) {
+        var atk = plan.attacks[a];
+        var srcCoords = { x: atk.source.x, y: atk.source.y };
+        var travel = TWTools.DataFetcher.calcTravelTime(srcCoords, targetCoords, atk.unitType);
+        var launchMs = newLandingMs - travel;
+        var landMsComp = newLandingMs % 1000;
+        var launchMsComp = ((launchMs % 1000) + 1000) % 1000;
+        if (launchMsComp !== landMsComp) {
+          launchMs = launchMs - launchMsComp + landMsComp;
+        }
+        atk.travelTimeMs = travel;
+        atk.launchTimeMs = launchMs;
+        atk.launchTomorrow = launchMs >= 86400000;
+        atk.alerted = false;
+      }
+
+      plan.attacks.sort(function(a, b) { return a.launchTimeMs - b.launchTimeMs; });
+      savePlans();
+      renderAllPlans();
+      TWTools.UI.toast('Landing time updated, ' + plan.attacks.length + ' attacks recalculated', 'success');
+    });
+
     // Chronological table
     var tableHtml = [
       '<table class="vis" id="' + ID_PREFIX + 'attack-table" style="width:100%;margin-top:4px;">',
@@ -618,6 +1018,7 @@
       '    <th>Countdown</th>',
       '    <th>Status</th>',
       '    <th>Alarm</th>',
+      '    <th></th>',
       '    <th></th>',
       '  </tr>',
       '</thead>',
@@ -666,6 +1067,9 @@
             '" data-label="' + escapeHtml(pl2.targetCoords) + ' ← ' + escapeHtml(atk.source.name) +
             '" style="cursor:pointer;font-size:9px;color:#2a6a8a;" title="Set reminder alarm">&#9200;</span>' +
         '</td>' +
+        '<td><span class="' + ID_PREFIX + 'del-attack" data-plan="' + entry.planIdx +
+          '" data-atk="' + entry.attackIdx + '" ' +
+          'style="cursor:pointer;color:#a02020;font-size:11px;" title="Remove attack">X</span></td>' +
         '</tr>'
       );
     }
@@ -1151,15 +1555,43 @@
   }
 
   /**
-   * Filter village rows by name or coords.
+   * Handle group dropdown change — lazy-fetch group membership then filter.
+   */
+  function onGroupChange() {
+    var groupId = parseInt($('#' + ID_PREFIX + 'village-group').val(), 10);
+    if (groupId === 0) {
+      applyVillageFilters();
+      return;
+    }
+    fetchGroupVillages(groupId, function() {
+      applyVillageFilters();
+    });
+  }
+
+  /**
+   * Filter village rows by name/coords text AND selected group.
    */
   function onFilterVillages() {
+    applyVillageFilters();
+  }
+
+  /**
+   * Apply both text and group filters to village rows.
+   */
+  function applyVillageFilters() {
     var query = ($('#' + ID_PREFIX + 'village-filter').val() || '').toLowerCase();
+    var groupId = parseInt($('#' + ID_PREFIX + 'village-group').val(), 10) || 0;
+    var groupIds = groupId > 0 ? (groupVillages[groupId] || []) : null;
+
     $('.' + ID_PREFIX + 'village-row').each(function() {
       var name = $(this).attr('data-name') || '';
       var coords = $(this).attr('data-coords') || '';
-      var match = !query || name.indexOf(query) !== -1 || coords.indexOf(query) !== -1;
-      $(this).toggle(match);
+      var vid = parseInt($(this).attr('data-village-id'), 10);
+
+      var matchesText = !query || name.indexOf(query) !== -1 || coords.indexOf(query) !== -1;
+      var matchesGroup = !groupIds || groupIds.indexOf(vid) !== -1;
+
+      $(this).toggle(matchesText && matchesGroup);
     });
   }
 
@@ -1208,6 +1640,13 @@
       '      </td>',
       '    </tr>',
       '    <tr>',
+      '      <td>Source group:</td>',
+      '      <td><select id="' + ID_PREFIX + 'fake-group" style="font-size:11px;">',
+      '        <option value="0">All villages</option>',
+      buildGroupOptions(),
+      '      </select></td>',
+      '    </tr>',
+      '    <tr>',
       '      <td>Max distance:</td>',
       '      <td><input type="number" id="' + ID_PREFIX + 'fake-max-dist" value="' + Settings.fakeMaxDistance + '" ',
       '        style="width:60px;font-size:11px;" min="1" max="500" /> fields</td>',
@@ -1246,8 +1685,23 @@
 
     $panel.html(html);
 
+    // Load saved fakes and render
+    loadFakes();
+    if (fakeEntries.length > 0) {
+      renderFakeResults();
+    }
+
     // Bind events
-    $('#' + ID_PREFIX + 'gen-fakes').on('click', onGenerateFakes);
+    $('#' + ID_PREFIX + 'gen-fakes').on('click', function() {
+      var fakeGroupId = parseInt($('#' + ID_PREFIX + 'fake-group').val(), 10) || 0;
+      if (fakeGroupId > 0 && !groupsFetched[fakeGroupId]) {
+        fetchGroupVillages(fakeGroupId, function() {
+          onGenerateFakes();
+        });
+      } else {
+        onGenerateFakes();
+      }
+    });
     $('#' + ID_PREFIX + 'export-fakes-bbcode').on('click', onExportFakesBBCode);
     $('#' + ID_PREFIX + 'load-player-vills').on('click', onLoadPlayerVillages);
   }
@@ -1377,6 +1831,16 @@
     fakeEntries = [];
     var nowMs = TWTools.TimeSync.now();
 
+    // Determine source villages based on group filter
+    var fakeGroupId = parseInt($('#' + ID_PREFIX + 'fake-group').val(), 10) || 0;
+    var fakeSourceVillages = playerVillages;
+    if (fakeGroupId > 0 && groupVillages[fakeGroupId]) {
+      var gIds = groupVillages[fakeGroupId];
+      fakeSourceVillages = playerVillages.filter(function(v) {
+        return gIds.indexOf(v.id) !== -1;
+      });
+    }
+
     for (var t = 0; t < targetList.length; t++) {
       var target = targetList[t];
       var targetStr2 = target.x + '|' + target.y;
@@ -1385,8 +1849,8 @@
       var bestVillage = null;
       var bestDist = Infinity;
 
-      for (var v = 0; v < playerVillages.length; v++) {
-        var src = playerVillages[v];
+      for (var v = 0; v < fakeSourceVillages.length; v++) {
+        var src = fakeSourceVillages[v];
         var srcCoords = { x: src.x, y: src.y };
         var dist = TWTools.distance(srcCoords, target);
         if (dist <= maxDist && dist < bestDist) {
@@ -1437,8 +1901,26 @@
     // Sort by launch time
     fakeEntries.sort(function(a, b) { return a.launchTimeMs - b.launchTimeMs; });
 
+    saveFakes();
     renderFakeResults();
     TWTools.UI.toast('Generated ' + fakeEntries.length + ' fakes for ' + targetList.length + ' targets', 'success');
+  }
+
+  /**
+   * Save fake entries to localStorage.
+   */
+  function saveFakes() {
+    TWTools.Storage.set(STORAGE_PREFIX + 'fakes', fakeEntries);
+  }
+
+  /**
+   * Load saved fakes from localStorage.
+   */
+  function loadFakes() {
+    var saved = TWTools.Storage.get(STORAGE_PREFIX + 'fakes');
+    if (saved && Array.isArray(saved)) {
+      fakeEntries = saved;
+    }
   }
 
   /**
@@ -1602,6 +2084,15 @@
       '        value="' + Settings.fakeMaxDistance + '" style="width:50px;font-size:11px;" min="1" /> fields</td>',
       '    </tr>',
 
+      // Default village group
+      '    <tr>',
+      '      <td>Default village group:</td>',
+      '      <td><select id="' + ID_PREFIX + 'set-group" style="font-size:11px;">',
+      '        <option value="0"' + (Settings.defaultGroupId === 0 ? ' selected' : '') + '>All villages</option>',
+      buildGroupOptions(),
+      '      </select></td>',
+      '    </tr>',
+
       '  </table>',
 
       '  <div style="margin-top:8px;">',
@@ -1609,6 +2100,8 @@
       '      Save Settings</button>',
       '    <button class="btn" id="' + ID_PREFIX + 'test-sound" style="font-size:11px;margin-left:6px;">',
       '      Test Sound</button>',
+      '    <button class="btn" id="' + ID_PREFIX + 'reset-settings" style="font-size:11px;margin-left:6px;color:#a02020;">',
+      '      Reset Defaults</button>',
       '  </div>',
 
       '  <div style="margin-top:12px;border-top:1px solid #c0a060;padding-top:6px;">',
@@ -1627,6 +2120,7 @@
 
     // Set current values
     $('#' + ID_PREFIX + 'set-unit').val(Settings.defaultUnit);
+    $('#' + ID_PREFIX + 'set-group').val(Settings.defaultGroupId);
 
     // Bind events
     $('#' + ID_PREFIX + 'save-settings').on('click', function() {
@@ -1638,12 +2132,19 @@
       Settings.alertRepeat = Math.max(1, Math.min(10, parseInt($('#' + ID_PREFIX + 'set-alert-repeat').val(), 10) || 3));
       Settings.autoSort = $('#' + ID_PREFIX + 'set-autosort').is(':checked');
       Settings.fakeMaxDistance = parseInt($('#' + ID_PREFIX + 'set-fake-dist').val(), 10) || 50;
+      Settings.defaultGroupId = parseInt($('#' + ID_PREFIX + 'set-group').val(), 10) || 0;
       Settings.save();
       TWTools.UI.toast('Settings saved', 'success');
     });
 
     $('#' + ID_PREFIX + 'test-sound').on('click', function() {
       playBeepRepeated();
+    });
+
+    $('#' + ID_PREFIX + 'reset-settings').on('click', function() {
+      Settings.reset();
+      buildSettingsTab();
+      TWTools.UI.toast('Settings reset to defaults', 'warning');
     });
   }
 

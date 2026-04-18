@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>TW Attack Planner Test Harness</title>
+  <style>
+    /* Minimal TW styles for .vis tables and .btn */
+    body { font-family: Verdana, Arial, sans-serif; font-size: 11px; background: #e2d5b0; }
+    table.vis { border-collapse: collapse; width: 100%; }
+    table.vis th { background: #c1a264; padding: 2px 4px; border: 1px solid #804000; font-size: 10px; }
+    table.vis td { padding: 2px 4px; border: 1px solid #c0a060; font-size: 10px; }
+    .btn { background: #c1a264; border: 1px solid #804000; padding: 2px 8px; cursor: pointer; font-size: 10px; }
+    .btn:hover { background: #d4b878; }
+    #serverTime { display: none; }
+  </style>
+</head>
+<body>
+  <span id="serverTime">12:00:00</span>
+
+  <!-- jQuery (TW provides this) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/1.12.4/jquery.min.js"></script>
+
+  <script>
+    // ============================================================
+    // MOCK TW GAME ENVIRONMENT
+    // ============================================================
+
+    // Mock game_data (TW global)
+    window.game_data = {
+      village: { id: 12345 },
+      player: { id: 99, name: 'TestPlayer' },
+      csrf: 'test_csrf_token',
+      groups: {
+        '10': 'Full NUKE',
+        '20': 'LOW nuke',
+        '30': 'Defensive',
+        '40': 'Fakes only'
+      }
+    };
+
+    // Mock Timing API
+    window.Timing = {
+      getCurrentServerTime: function() {
+        return Date.now();
+      }
+    };
+
+    // Mock UI for toasts
+    window.UI = {
+      SuccessMessage: function(msg) {
+        var el = document.createElement('div');
+        el.className = 'test-toast success';
+        el.textContent = msg;
+        document.body.appendChild(el);
+        setTimeout(function() { el.remove(); }, 5000);
+      },
+      ErrorMessage: function(msg) {
+        var el = document.createElement('div');
+        el.className = 'test-toast error';
+        el.textContent = msg;
+        document.body.appendChild(el);
+        setTimeout(function() { el.remove(); }, 5000);
+      }
+    };
+
+    // ============================================================
+    // MOCK AJAX — intercept TW API calls
+    // ============================================================
+    var _originalAjax = $.ajax;
+    var mockVillages = [];
+    var mockGroups = {};
+
+    // Generate 20 test villages for player 99
+    for (var i = 0; i < 20; i++) {
+      mockVillages.push({
+        id: 1000 + i,
+        name: String.fromCharCode(65 + (i % 26)) + ' Village ' + (i + 1),
+        x: 450 + i,
+        y: 450 + Math.floor(i / 2),
+        owner: 99,
+        points: 5000 + i * 500
+      });
+    }
+
+    // Assign villages to groups
+    mockGroups['10'] = [1000, 1001, 1002, 1003, 1004];  // Full NUKE: 5 villages
+    mockGroups['20'] = [1005, 1006, 1007, 1008, 1009];  // LOW nuke: 5 villages
+    mockGroups['30'] = [1010, 1011, 1012, 1013, 1014];  // Defensive: 5 villages
+    mockGroups['40'] = [1015, 1016, 1017, 1018, 1019];  // Fakes only: 5 villages
+
+    // Build village.txt CSV
+    var villageCsv = mockVillages.map(function(v) {
+      return v.id + ',' + encodeURIComponent(v.name) + ',' + v.x + ',' + v.y + ',' + v.owner + ',' + v.points + ',0';
+    }).join('\n');
+
+    // Build combined overview HTML for troop data
+    function buildOverviewHtml(groupId) {
+      var vils = mockVillages;
+      if (groupId && groupId !== '0') {
+        var gIds = mockGroups[groupId] || [];
+        vils = mockVillages.filter(function(v) { return gIds.indexOf(v.id) !== -1; });
+      }
+
+      var html = '<table class="vis overview_table" id="combined_table">';
+      html += '<thead><tr><th>Village</th>';
+      var units = ['spear', 'sword', 'axe', 'spy', 'light', 'heavy', 'ram', 'catapult', 'knight', 'snob'];
+      for (var u = 0; u < units.length; u++) {
+        html += '<th><img src="/graphic/unit/unit_' + units[u] + '.png" /></th>';
+      }
+      html += '</tr></thead><tbody>';
+
+      for (var i = 0; i < vils.length; i++) {
+        var v = vils[i];
+        html += '<tr>';
+        html += '<td><a href="/game.php?village=' + v.id + '&screen=main">' +
+                v.name + ' (' + v.x + '|' + v.y + ') K' + Math.floor(v.x / 100) + Math.floor(v.y / 100) + '</a></td>';
+        // Troop counts: vary by village for realistic data
+        var troopCounts = {
+          spear: 100 + i * 50, sword: 80 + i * 30, axe: 200 + i * 100,
+          spy: 50, light: 100 + i * 80, heavy: 50 + i * 20,
+          ram: 100 + i * 10, catapult: 20, knight: (i % 3 === 0 ? 1 : 0), snob: (i % 5 === 0 ? 1 : 0)
+        };
+        for (var u2 = 0; u2 < units.length; u2++) {
+          html += '<td>' + troopCounts[units[u2]] + '</td>';
+        }
+        html += '</tr>';
+      }
+
+      html += '</tbody></table>';
+      return html;
+    }
+
+    // Build player.txt CSV
+    var playerCsv = '99,' + encodeURIComponent('TestPlayer') + ',1,20,0,100000\n' +
+                    '100,' + encodeURIComponent('EnemyPlayer') + ',2,15,0,80000\n';
+
+    // Enemy villages for fake targets
+    var enemyVillages = '';
+    for (var e = 0; e < 10; e++) {
+      enemyVillages += (2000 + e) + ',' + encodeURIComponent('Enemy Village ' + (e + 1)) +
+        ',' + (460 + e) + ',' + (460 + e) + ',100,' + (3000 + e * 200) + ',0\n';
+    }
+
+    $.ajax = function(opts) {
+      var url = opts.url || '';
+      var deferred = $.Deferred();
+
+      setTimeout(function() {
+        // World config
+        if (url.indexOf('get_config') !== -1) {
+          var xmlStr = '<?xml version="1.0"?><config><speed>2</speed><unit_speed>1.5</unit_speed><moral>1</moral><church>0</church></config>';
+          var parser = new DOMParser();
+          var xml = parser.parseFromString(xmlStr, 'text/xml');
+          if (opts.success) opts.success(xml);
+          deferred.resolve(xml);
+        }
+        // Unit info
+        else if (url.indexOf('get_unit_info') !== -1) {
+          var xmlStr2 = '<?xml version="1.0"?><config>' +
+            '<spear><speed>18</speed></spear><sword><speed>22</speed></sword>' +
+            '<axe><speed>18</speed></axe><spy><speed>9</speed></spy>' +
+            '<light><speed>10</speed></light><heavy><speed>11</speed></heavy>' +
+            '<ram><speed>30</speed></ram><catapult><speed>30</speed></catapult>' +
+            '<knight><speed>10</speed></knight><snob><speed>35</speed></snob>' +
+            '</config>';
+          var parser2 = new DOMParser();
+          var xml2 = parser2.parseFromString(xmlStr2, 'text/xml');
+          if (opts.success) opts.success(xml2);
+          deferred.resolve(xml2);
+        }
+        // Village list
+        else if (url.indexOf('village.txt') !== -1) {
+          var csv = villageCsv + '\n' + enemyVillages;
+          if (opts.success) opts.success(csv);
+          deferred.resolve(csv);
+        }
+        // Player list
+        else if (url.indexOf('player.txt') !== -1) {
+          if (opts.success) opts.success(playerCsv);
+          deferred.resolve(playerCsv);
+        }
+        // Combined overview (troop data + group filtering)
+        else if (url.indexOf('overview_villages') !== -1 && url.indexOf('mode=combined') !== -1) {
+          var groupMatch = url.match(/group=(\d+)/);
+          var gid = groupMatch ? groupMatch[1] : '0';
+          var overviewHtml = buildOverviewHtml(gid);
+          if (opts.success) opts.success(overviewHtml);
+          deferred.resolve(overviewHtml);
+        }
+        else {
+          if (opts.error) opts.error({ status: 404, statusText: 'Not Found' });
+          deferred.reject({ status: 404 });
+        }
+      }, 50);
+
+      return deferred.promise();
+    };
+
+    // Expose mocks for test assertions
+    window.__TEST__ = {
+      mockVillages: mockVillages,
+      mockGroups: mockGroups,
+      villageCsv: villageCsv
+    };
+  </script>
+
+  <!-- Load TW Tools scripts -->
+  <script src="../../lib/tw-core.js"></script>
+  <script src="../../lib/tw-ui.js"></script>
+  <script src="../../scripts/tw-planner.js"></script>
+</body>
+</html>
