@@ -371,11 +371,18 @@
   // VILLAGE GROUPS
   // ============================================================
 
+  /** @type {boolean} Whether groups have been loaded. */
+  var groupsLoaded = false;
+
   /**
-   * Load village groups from TW game_data or DOM.
+   * Load village groups — tries game_data, DOM, then AJAX fetch.
+   * Calls callback when groups are ready (may be async if AJAX needed).
+   * @param {function} [callback] - Called when groups are loaded.
    */
-  function loadVillageGroups() {
+  function loadVillageGroups(callback) {
     villageGroups = [];
+
+    // Method 1: game_data.groups
     try {
       if (typeof game_data !== 'undefined' && game_data.groups) {
         var groups = game_data.groups;
@@ -389,7 +396,7 @@
       }
     } catch (e) {}
 
-    // Fallback: try DOM group selector
+    // Method 2: DOM group selector on current page
     if (villageGroups.length === 0) {
       var $select = $('#group_id, select[name="group_id"]');
       if ($select.length > 0) {
@@ -402,10 +409,95 @@
       }
     }
 
-    // Sort groups alphabetically
-    villageGroups.sort(function(a, b) {
-      return a.name.localeCompare(b.name);
+    // Method 3: DOM group links on current page
+    if (villageGroups.length === 0) {
+      $('#group_table a[data-group-id], .group-menu-item a').each(function() {
+        var $a = $(this);
+        var gid = $a.data('group-id') || $a.attr('data-group-id');
+        if (gid !== undefined && parseInt(gid, 10) > 0) {
+          villageGroups.push({ id: parseInt(gid, 10), name: $a.text().trim() });
+        }
+      });
+    }
+
+    if (villageGroups.length > 0) {
+      villageGroups.sort(function(a, b) { return a.name.localeCompare(b.name); });
+      groupsLoaded = true;
+      if (callback) callback();
+      return;
+    }
+
+    // Method 4: AJAX fetch from overview page (always has group dropdown)
+    $.ajax({
+      url: '/game.php?screen=overview_villages&mode=combined&page=0',
+      dataType: 'html',
+      timeout: 10000,
+      success: function(html) {
+        var $doc = $('<div/>').html(html);
+
+        // Parse group links: <a> tags with group=NNN in href
+        $doc.find('a[href*="group="]').each(function() {
+          var $a = $(this);
+          var href = $a.attr('href') || '';
+          // Only overview-related group links, skip pagination etc.
+          if (href.indexOf('screen=overview_villages') === -1 &&
+              href.indexOf('screen=place') === -1) return;
+          var match = href.match(/group=(\d+)/);
+          if (match) {
+            var gid = parseInt(match[1], 10);
+            if (gid > 0) {
+              // Avoid duplicates
+              for (var i = 0; i < villageGroups.length; i++) {
+                if (villageGroups[i].id === gid) return;
+              }
+              var gname = $a.text().trim().replace(/^\[|\]$/g, '');
+              if (gname) {
+                villageGroups.push({ id: gid, name: gname });
+              }
+            }
+          }
+        });
+
+        // Also try select dropdown in fetched page
+        if (villageGroups.length === 0) {
+          $doc.find('#group_id option, select[name="group_id"] option').each(function() {
+            var val = parseInt($(this).val(), 10);
+            if (val > 0) {
+              villageGroups.push({ id: val, name: $(this).text().trim() });
+            }
+          });
+        }
+
+        villageGroups.sort(function(a, b) { return a.name.localeCompare(b.name); });
+        groupsLoaded = true;
+
+        // Update dropdown if UI already rendered
+        updateGroupDropdowns();
+
+        if (callback) callback();
+      },
+      error: function() {
+        groupsLoaded = true;
+        if (callback) callback();
+      }
     });
+  }
+
+  /**
+   * Update all group dropdown elements with current villageGroups data.
+   * Called after async group loading completes.
+   */
+  function updateGroupDropdowns() {
+    var opts = '<option value="0">All villages</option>' + buildGroupOptions();
+    $('#' + ID_PREFIX + 'village-group').html(opts);
+    $('#' + ID_PREFIX + 'fake-group').html(opts);
+    $('#' + ID_PREFIX + 'set-group').html(opts);
+
+    // Restore default group selection
+    if (Settings.defaultGroupId > 0) {
+      $('#' + ID_PREFIX + 'village-group').val(Settings.defaultGroupId);
+      $('#' + ID_PREFIX + 'set-group').val(Settings.defaultGroupId);
+    }
   }
 
   /**
