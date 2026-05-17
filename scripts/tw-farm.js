@@ -19,7 +19,15 @@
   var LC_SPEED = 10;
   var LC_CARRY = 80;
   var DEFAULT_SETTINGS = {
-    groupId: '0', maxDistance: 20, cooldownMinutes: 5, minLC: 5, useBForMaxLoot: true
+    groupId: '0', maxDistance: 20, cooldownMinutes: 5, minLC: 5, useBForMaxLoot: true,
+    // Auto-farm: 'safe' jitters wider and inserts micro-pauses; 'raw' is the
+    // literal request — uniform 500-800ms, no pauses. Raw mode is a clear bot
+    // fingerprint and may get the account banned.
+    autoMode: 'safe',
+    autoDelaySafeMin: 1200, autoDelaySafeMax: 3500,
+    autoDelayRawMin:  500,  autoDelayRawMax:  800,
+    autoSafeBurstMin: 10,   autoSafeBurstMax: 20,
+    autoSafePauseMin: 5000, autoSafePauseMax: 10000
   };
   var LOOT = { GREEN: 'green', YELLOW: 'yellow', RED: 'red', UNKNOWN: 'unknown' };
 
@@ -45,6 +53,8 @@
   /** @type {Object|null} Unit counts for template B, e.g. {light: 2} */
   var templateBUnits = null;
   var farmSentCount = 0, farmErrorCount = 0, enterKeyBound = false;
+  var autoRunning = false, autoAbort = false, autoConsecErr = 0, autoSinceBurst = 0;
+  var autoNextBurstAt = 0, autoTimer = null;
 
   // ---- Format helpers ----
   function formatNum(n) { return (typeof n !== 'number' || isNaN(n)) ? '0' : n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, '.'); }
@@ -545,6 +555,18 @@
       '<tr class="row_a"><td><b>Use B for max loot</b></td><td>' +
         '<input type="checkbox" id="twf-d-useb"' + (settings.useBForMaxLoot ? ' checked' : '') + '> ' +
         'Send Template B to full-haul targets</td></tr>' +
+      '<tr class="row_b"><td><b>Auto-send mode</b></td><td>' +
+        '<select id="twf-d-automode" style="font-size:11px;">' +
+          '<option value="safe"' + (settings.autoMode === 'safe' ? ' selected' : '') + '>' +
+            'Safe (1.2-3.5s jitter, 5-10s pauses)</option>' +
+          '<option value="raw"' + (settings.autoMode === 'raw' ? ' selected' : '') + '>' +
+            'Raw (500-800ms, no pauses)</option>' +
+        '</select>' +
+        '<div id="twf-d-warn" style="display:' + (settings.autoMode === 'raw' ? 'block' : 'none') +
+          ';margin-top:4px;padding:4px 6px;background:#fde0e0;border:1px solid #c08080;border-radius:2px;' +
+          'font-size:10px;color:#8a2020;">' +
+          '<b>Warning:</b> Raw mode is a bot fingerprint. Account ban risk.</div>' +
+      '</td></tr>' +
       '</table>' +
       '<div style="padding:6px;background:#f0e0b0;border:1px solid #c0a060;border-radius:3px;margin:10px 0;font-size:10px;">' +
         '<b>Templates:</b> A=' + (realTemplateA !== null ? realTemplateA : '<i>?</i>') +
@@ -566,6 +588,9 @@
       $('#twf-d-save').on('click', function() { readDlgSettings(); saveSettings(); TWTools.UI.toast('Settings saved', 'success'); });
       $('#twf-d-plan').on('click', function() { readDlgSettings(); saveSettings(); Dialog.close(); startScanAndPlan(); });
       $('#twf-d-close').on('click', function() { Dialog.close(); });
+      $('#twf-d-automode').on('change', function() {
+        $('#twf-d-warn').css('display', $(this).val() === 'raw' ? 'block' : 'none');
+      });
     }, 50);
   }
 
@@ -575,6 +600,8 @@
     settings.cooldownMinutes = parseInt($('#twf-d-cd').val(), 10) || 5;
     settings.minLC = parseInt($('#twf-d-lc').val(), 10) || 5;
     settings.useBForMaxLoot = $('#twf-d-useb').is(':checked');
+    var m = $('#twf-d-automode').val();
+    if (m === 'safe' || m === 'raw') settings.autoMode = m;
   }
 
   // ============================================================
@@ -625,6 +652,7 @@
         'display:flex;align-items:center;justify-content:space-between;">' +
         '<span style="font-weight:bold;font-size:12px;">TW Farm v' + VERSION + '</span>' +
         '<span id="twf-ptxt" style="font-size:11px;">0 / ' + total + ' sent</span>' +
+        '<button class="btn" id="twf-auto" title="Auto-send all attacks (mode: ' + settings.autoMode + ')">Start Farm</button>' +
         '<button class="btn" id="twf-cancel">Cancel</button>' +
       '</div>' +
       // Progress bar
@@ -658,7 +686,7 @@
     h += '</tbody></table>' +
       '<div style="padding:4px 10px;background:#e8d8a8;border:1px solid #804000;border-top:none;' +
         'border-radius:0 0 3px 3px;font-size:10px;color:#5a4a2a;">' +
-        '<span id="twf-sum">' + total + ' attacks planned. Click farm icon or press <b>Enter</b> to send.</span></div></div>';
+        '<span id="twf-sum">' + total + ' attacks planned. Click farm icon, press <b>Enter</b>, or <b>Start Farm</b> for auto-send (<b>Esc</b> stops).</span></div></div>';
 
     var $w = $('#am_widget_Farm');
     $w.length ? $w.before(h) : $('#contentContainer').prepend(h);
@@ -668,8 +696,11 @@
 
     // Events
     $('#twf-tbl').on('click', '.twf-si', function(e) { e.preventDefault(); sendEntry(parseInt($(this).attr('data-idx'), 10)); });
-    $('#twf-cancel').on('click', function() { finishFarming('Cancelled by user.'); });
-    bindEnterKey();
+    $('#twf-cancel').on('click', function() { stopAutoFarm(); finishFarming('Cancelled by user.'); });
+    $('#twf-auto').on('click', function() {
+      if (autoRunning) { stopAutoFarm('Stopped.'); } else { startAutoFarm(); }
+    });
+    bindHotkeys();
     injectFarmCSS();
   }
 
@@ -681,21 +712,26 @@
     '</style>').appendTo('head');
   }
 
-  function removeFarmTable() { $('#twf-fc').remove(); unbindEnterKey(); }
+  function removeFarmTable() { $('#twf-fc').remove(); unbindHotkeys(); }
 
-  // ---- Enter key ----
-  function bindEnterKey() {
+  // ---- Hotkeys (Enter sends next, Esc stops auto) ----
+  function bindHotkeys() {
     if (enterKeyBound) return; enterKeyBound = true;
     $(document).on('keydown.twfarm', function(e) {
-      if (e.which !== 13 || !isFarming) return;
+      if (!isFarming) return;
       var tag = (e.target.tagName || '').toLowerCase();
       if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
-      e.preventDefault();
-      var $fr = $('#twf-tbody tr:first');
-      if ($fr.length) sendEntry(parseInt($fr.attr('data-idx'), 10));
+      if (e.which === 13) { // Enter — send next manually
+        e.preventDefault();
+        var $fr = $('#twf-tbody tr:first');
+        if ($fr.length) sendEntry(parseInt($fr.attr('data-idx'), 10));
+      } else if (e.which === 27 && autoRunning) { // Esc — stop auto
+        e.preventDefault();
+        stopAutoFarm('Stopped (Esc).');
+      }
     });
   }
-  function unbindEnterKey() { if (!enterKeyBound) return; enterKeyBound = false; $(document).off('keydown.twfarm'); }
+  function unbindHotkeys() { if (!enterKeyBound) return; enterKeyBound = false; $(document).off('keydown.twfarm'); }
 
   // ============================================================
   // SEND FARM ENTRY
@@ -743,11 +779,21 @@
   }
 
   function onSendOk(idx, pl, resp) {
+    // Captcha / bot-protection: TW sometimes returns this in place of a normal
+    // response when it suspects automation. Treat as a hard stop, not a retry.
+    if (resp && isBotProtection(resp)) {
+      autoAbort = true;
+      onSendErr(idx, pl, 'CAPTCHA / bot protection');
+      TWTools.UI.toast('CAPTCHA detected — auto-farm stopped.', 'error');
+      return;
+    }
     if (resp && resp.error) {
       onSendErr(idx, pl, Array.isArray(resp.error) ? resp.error[0] : String(resp.error));
       return;
     }
     farmSentCount++;
+    autoConsecErr = 0;
+    autoSinceBurst++;
     if (resp && resp.units) updateUnits(pl.sourceId, resp.units);
 
     if (typeof UI !== 'undefined' && typeof UI.SuccessMessage === 'function') {
@@ -766,6 +812,7 @@
 
   function onSendErr(idx, pl, msg) {
     farmErrorCount++;
+    autoConsecErr++;
     var $r = $('#twf-r-' + idx);
     $r.removeClass('twf-sending').find('.twf-si').css('opacity', '1');
     $r.css('background', '#f5c0c0');
@@ -803,7 +850,7 @@
   }
 
   function finishFarming(msg) {
-    isFarming = false; unbindEnterKey();
+    isFarming = false; unbindHotkeys();
     var $fc = $('#twf-fc');
     if ($fc.length) {
       $fc.html('<div style="padding:10px;background:#f0e0b0;border:1px solid #804000;border-radius:3px;text-align:center;">' +
@@ -815,6 +862,104 @@
       setTimeout(removeFarmTable, 10000);
     }
     TWTools.UI.toast(msg, 'success');
+  }
+
+  // ============================================================
+  // AUTO-FARM LOOP
+  // ============================================================
+
+  function randInt(lo, hi) { return lo + Math.floor(Math.random() * (hi - lo + 1)); }
+
+  function isBotProtection(resp) {
+    if (!resp || typeof resp !== 'object') return false;
+    if (resp.bot_protection || resp.captcha || resp.human_check) return true;
+    var blob = '';
+    try { blob = JSON.stringify(resp.error || resp); } catch (e) { blob = String(resp); }
+    return /bot[_ ]?protection|captcha|human[_ ]?check|hcaptcha|recaptcha/i.test(blob);
+  }
+
+  function nextAutoDelayMs() {
+    var s = settings;
+    if (s.autoMode === 'raw') return randInt(s.autoDelayRawMin, s.autoDelayRawMax);
+    // safe mode: long pause when we've burned through the current burst
+    if (autoSinceBurst >= autoNextBurstAt) {
+      autoSinceBurst = 0;
+      autoNextBurstAt = randInt(s.autoSafeBurstMin, s.autoSafeBurstMax);
+      return randInt(s.autoSafePauseMin, s.autoSafePauseMax);
+    }
+    return randInt(s.autoDelaySafeMin, s.autoDelaySafeMax);
+  }
+
+  function setAutoBtn(running) {
+    var $b = $('#twf-auto');
+    if (!$b.length) return;
+    if (running) {
+      $b.text('STOP (Esc)').css({ background: '#a02020', color: '#fff', borderColor: '#601010' });
+    } else {
+      $b.text('Start Farm').css({ background: '', color: '', borderColor: '' });
+    }
+  }
+
+  function startAutoFarm() {
+    if (autoRunning || !isFarming) return;
+    if (!$('#twf-tbody tr').length) { TWTools.UI.toast('Nothing left to send.', 'warning'); return; }
+    autoRunning = true; autoAbort = false; autoConsecErr = 0; autoSinceBurst = 0;
+    autoNextBurstAt = randInt(settings.autoSafeBurstMin, settings.autoSafeBurstMax);
+    setAutoBtn(true);
+    var modeLabel = settings.autoMode === 'raw' ? 'RAW' : 'SAFE';
+    TWTools.UI.toast('Auto-farm started (' + modeLabel + '). Press Esc to stop.',
+      settings.autoMode === 'raw' ? 'warning' : 'success');
+    scheduleNextAutoSend(0);
+  }
+
+  function stopAutoFarm(msg) {
+    if (!autoRunning && !autoTimer) return;
+    autoRunning = false; autoAbort = true;
+    if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; }
+    setAutoBtn(false);
+    if (msg) TWTools.UI.toast(msg, 'warning');
+  }
+
+  /**
+   * Schedule the next auto-send after `delayMs` ms.
+   * @param {number} delayMs - 0 for immediate dispatch, otherwise jittered delay.
+   */
+  function scheduleNextAutoSend(delayMs) {
+    if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; }
+    autoTimer = setTimeout(function() {
+      autoTimer = null;
+      tickAutoFarm();
+    }, delayMs);
+  }
+
+  function tickAutoFarm() {
+    if (!autoRunning || autoAbort) { stopAutoFarm(); return; }
+    if (autoConsecErr >= 3) { stopAutoFarm('Auto-farm stopped: 3 consecutive errors.'); return; }
+    var $fr = $('#twf-tbody tr:first');
+    if (!$fr.length) { stopAutoFarm(); return; } // finishFarming will fire from onSendOk
+
+    var sentBefore = farmSentCount, errBefore = farmErrorCount;
+    var idx = parseInt($fr.attr('data-idx'), 10);
+    sendEntry(idx);
+
+    // Poll for the send result, then schedule next. sendEntry is async (AJAX),
+    // and onSendOk/onSendErr increment counters when it lands.
+    var waited = 0;
+    var poll = setInterval(function() {
+      if (!autoRunning || autoAbort) { clearInterval(poll); stopAutoFarm(); return; }
+      var landed = farmSentCount !== sentBefore || farmErrorCount !== errBefore;
+      waited += 100;
+      if (landed) {
+        clearInterval(poll);
+        if (autoAbort) { stopAutoFarm(); return; }
+        scheduleNextAutoSend(nextAutoDelayMs());
+      } else if (waited >= 20000) {
+        // 20s without a response — treat as error, increment, move on
+        clearInterval(poll);
+        autoConsecErr++;
+        scheduleNextAutoSend(nextAutoDelayMs());
+      }
+    }, 100);
   }
 
   // ============================================================
