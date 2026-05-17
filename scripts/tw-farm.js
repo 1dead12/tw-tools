@@ -621,6 +621,10 @@
         }
         removeStatusBar();
         injectFarmTable();
+        // Fire auto-send immediately — the quickbar entry point is meant to be
+        // one click, not three. Esc stops, STOP button stops, mid-flight Cancel
+        // stops. Settings are reachable via the toolbar button.
+        setTimeout(startAutoFarm, 50);
       }, function(s) { updateStatusBar(s); });
     });
   }
@@ -968,7 +972,7 @@
 
   function injectToolbarButton() {
     if ($('#twf-btn').length) return;
-    var $btn = $('<button class="btn" id="twf-btn" style="font-weight:bold;margin-left:10px;padding:2px 10px;">TW Farm</button>');
+    var $btn = $('<button class="btn" id="twf-btn" title="Open settings / re-scan" style="font-weight:bold;margin-left:10px;padding:2px 10px;">TW Farm</button>');
 
     var $hdr = $('h3:contains("Farm"), h4:contains("Farm")').filter(function() {
       return $(this).closest('#am_widget_Farm, .am_widget, #contentContainer').length > 0;
@@ -1011,10 +1015,13 @@
       for (var i = 0; i < groups.length; i++) { if (groups[i].id === settings.groupId) { found = true; break; } }
       if (!found) { settings.groupId = '0'; saveSettings(); }
     });
-    TWTools.DataFetcher.fetchWorldConfig(function() {});
 
     injectToolbarButton();
-    TWTools.UI.toast('TW Farm v' + VERSION + ' loaded', 'success');
+    TWTools.UI.toast('TW Farm v' + VERSION + ' — auto-running...', 'success');
+
+    // Quickbar = one click. Scan + plan + auto-send fires now using saved
+    // settings. Toolbar "TW Farm" button still opens the dialog for changes.
+    startScanAndPlan();
   }
 
   $(function() {
