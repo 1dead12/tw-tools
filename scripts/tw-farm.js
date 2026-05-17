@@ -9,11 +9,6 @@
 ;(function(window, $) {
   'use strict';
 
-  if (!$ || typeof $ !== 'function') {
-    try { alert('TW Farm: jQuery not found on this page. Open the TW game (not the mobile login screen) and try again.'); } catch (e) {}
-    return;
-  }
-
   if (!window.TWTools || !window.TWTools.UI) {
     throw new Error('tw-farm.js requires tw-core.js and tw-ui.js');
   }
@@ -1037,35 +1032,10 @@
     startScanAndPlan();
   }
 
-  /**
-   * Force desktop layout on TW mobile (body.mds). The Farm Assistant widget
-   * needs the desktop DOM (#am_widget_Farm, #plunder_list, farm_icon_a/b
-   * markup) which the mobile layout doesn't render. Sets the same mobile=0
-   * cookie TW's own "request desktop" link uses, then reloads.
-   *
-   * Returns true if a reload was triggered (caller must not proceed).
-   */
-  function forceDesktopIfMobile() {
-    try {
-      if (!document.body || !document.body.classList.contains('mds')) return false;
-      document.cookie = 'mobile=0; path=/; max-age=31536000';
-      // Visible feedback — toast UI may not yet be styled before reload.
-      try { alert('TW Farm: switching to desktop layout (Farm Assistant needs the desktop DOM).'); } catch (e) {}
-      window.location.reload();
-      return true;
-    } catch (e) {
-      return false;
-    }
-  }
-
   $(function() {
-    if (forceDesktopIfMobile()) return;
-    if (!TWTools.getPlayerId()) {
-      try { alert('TW Farm: could not detect player (game_data.player missing). Open the TW game first.'); } catch (e) {}
-      return;
-    }
+    if (!TWTools.getPlayerId()) return;
     if (!ensureAmFarmPage()) return;
     init();
   });
 
-})(window, window.jQuery || window.$);
+})(window, jQuery);
