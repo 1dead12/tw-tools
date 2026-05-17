@@ -657,6 +657,7 @@
         '<span style="font-weight:bold;font-size:12px;">TW Farm v' + VERSION + '</span>' +
         '<span id="twf-ptxt" style="font-size:11px;">0 / ' + total + ' sent</span>' +
         '<button class="btn" id="twf-auto" title="Auto-send all attacks (mode: ' + settings.autoMode + ')">Start Farm</button>' +
+        '<button class="btn" id="twf-settings" title="Open settings / re-scan" style="padding:2px 8px;">&#9881;</button>' +
         '<button class="btn" id="twf-cancel">Cancel</button>' +
       '</div>' +
       // Progress bar
@@ -703,6 +704,13 @@
     $('#twf-cancel').on('click', function() { stopAutoFarm(); finishFarming('Cancelled by user.'); });
     $('#twf-auto').on('click', function() {
       if (autoRunning) { stopAutoFarm('Stopped.'); } else { startAutoFarm(); }
+    });
+    $('#twf-settings').on('click', function() {
+      // Pause auto-send while the dialog is open so settings can't change
+      // mid-flight. Saving + "Scan & Plan" in the dialog will re-fire the
+      // auto-flow with the new settings.
+      if (autoRunning) stopAutoFarm('Paused for settings.');
+      showSettingsDialog();
     });
     bindHotkeys();
     injectFarmCSS();
