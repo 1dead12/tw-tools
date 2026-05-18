@@ -55,6 +55,8 @@
   var farmSentCount = 0, farmErrorCount = 0, enterKeyBound = false;
   var autoRunning = false, autoAbort = false, autoConsecErr = 0, autoSinceBurst = 0;
   var autoNextBurstAt = 0, autoTimer = null;
+  /** @type {?Object} Last plan's filter breakdown — surfaced in the farm-table footer. */
+  var planSkipStats = null;
 
   // ---- Format helpers ----
   function formatNum(n) { return (typeof n !== 'number' || isNaN(n)) ? '0' : n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, '.'); }
@@ -68,6 +70,28 @@
   function fmtTime(ms) {
     var t = Math.floor(ms / 1000), h = Math.floor(t / 3600) % 24, m = Math.floor((t % 3600) / 60), s = t % 60;
     return TWTools.pad2(h) + ':' + TWTools.pad2(m) + ':' + TWTools.pad2(s);
+  }
+
+  /**
+   * Render the filter-skip breakdown for the farm-table footer. Shows exactly
+   * how many targets were dropped from the plan and why, so you can see the
+   * cooldown / collision filters in action.
+   * @returns {string} HTML fragment (empty if no stats yet).
+   */
+  function buildSkipBreakdown() {
+    var s = planSkipStats;
+    if (!s) return '';
+    var parts = [];
+    if (s.cooldown)      parts.push('<span title="last farm report within cooldown">cooldown: <b>' + s.cooldown + '</b></span>');
+    if (s.collision)     parts.push('<span title="another outgoing attack arrives within cooldown">collision: <b>' + s.collision + '</b></span>');
+    if (s.selfCollision) parts.push('<span title="another planned attack this session arrives within cooldown">self-collision: <b>' + s.selfCollision + '</b></span>');
+    if (s.active)        parts.push('<span title="target already has an active attack from this village">active: <b>' + s.active + '</b></span>');
+    if (s.noUnits)       parts.push('<span title="source village ran out of units for the template">no-units: <b>' + s.noUnits + '</b></span>');
+    var meta = '<span style="color:#7a6840;">' + s.sources + ' sources × ' + s.targets + ' targets</span>';
+    var skipped = parts.length
+      ? '<span style="margin-left:8px;color:#7a6840;">skipped: ' + parts.join(', ') + '</span>'
+      : '';
+    return '<div style="margin-top:2px;font-size:10px;">' + meta + skipped + '</div>';
   }
 
   // ============================================================
@@ -238,17 +262,24 @@
     if (r0.sendLink && !sendUnitsLink) sendUnitsLink = r0.sendLink;
     if (statusCb) statusCb('Farm targets: page 1 (' + targets.length + ' targets)...');
 
-    if (!r0.hasNextPage) { callback(targets); return; }
+    // Pagination: walk pages 1..N while parser finds links to higher Farm_page numbers.
+    // currentPage starts at 0 (the live DOM); we fetch page=1, 2, 3, ... until parser
+    // says no link points beyond what we've fetched. Text-based "Next/>>" detection
+    // doesn't work across locales (sk103 uses "Ďalšia" etc.).
+    var currentPage = 0;
+    if (r0.maxPaginatedPage <= currentPage) { callback(targets); return; }
 
-    var page = 1;
     (function fetchNext() {
-      var url = '/game.php?village=' + TWTools.getVillageId() + '&screen=am_farm&Farm_page=' + page;
+      currentPage++;
+      var url = '/game.php?village=' + TWTools.getVillageId() +
+        '&screen=am_farm&order=distance&dir=asc&Farm_page=' + currentPage;
       $.ajax({ url: url, dataType: 'html', timeout: 15000,
         success: function(html) {
           var rp = parseFarmTargets(html);
           targets = targets.concat(rp.targets);
-          if (statusCb) statusCb('Farm targets: page ' + (page + 1) + ' (' + targets.length + ')...');
-          if (rp.hasNextPage) { page++; setTimeout(fetchNext, 200); } else callback(targets);
+          if (statusCb) statusCb('Farm targets: page ' + (currentPage + 1) + ' (' + targets.length + ')...');
+          if (rp.maxPaginatedPage > currentPage) setTimeout(fetchNext, 200);
+          else callback(targets);
         },
         error: function() { callback(targets); }
       });
@@ -360,18 +391,29 @@
       });
     }
 
-    // Pagination
-    var hasNext = false;
-    $p.find('a[href*="Farm_page"]').each(function() {
-      var txt = $.trim($(this).text()), href = $(this).attr('href') || '';
-      if ((txt === '>>' || txt === '>' || /next|Dopredu/i.test(txt)) && href.match(/Farm_page=\d+/)) hasNext = true;
+    // Pagination — track the highest Farm_page=N value found in any link on
+    // this page. Locale-independent (no text matching). Caller compares vs
+    // the page it's currently on.
+    var maxPaginatedPage = 0;
+    $p.find('a[href*="Farm_page="]').each(function() {
+      var m = ($(this).attr('href') || '').match(/Farm_page=(\d+)/);
+      if (m) {
+        var n = parseInt(m[1], 10);
+        if (n > maxPaginatedPage) maxPaginatedPage = n;
+      }
     });
+    // Keep the legacy text-based detection too (some skins/themes only show
+    // a "next" arrow with no numeric link to higher pages).
+    var hasNext = maxPaginatedPage > 0;
     $p.find('.paged-nav-item').each(function() {
       var txt = $.trim($(this).text());
       if (txt === '>' || txt === '>>') { hasNext = true; return false; }
     });
 
-    return { targets: targets, hasNextPage: hasNext, csrf: csrf, sendLink: sendLink };
+    return {
+      targets: targets, hasNextPage: hasNext, maxPaginatedPage: maxPaginatedPage,
+      csrf: csrf, sendLink: sendLink
+    };
   }
 
   // ============================================================
@@ -437,6 +479,10 @@
     if (TWTools.DataFetcher._worldConfig) { ws = TWTools.DataFetcher._worldConfig.speed || 1; usf = TWTools.DataFetcher._worldConfig.unitSpeed || 1; }
     var planned = {}, nowMs = TWTools.TimeSync.now(), cdMs = settings.cooldownMinutes * 60000;
 
+    // Visible filter counters — surfaced in the farm-table footer so you can
+    // see exactly why N targets were excluded from the plan.
+    var skipActive = 0, skipCooldown = 0, skipCollision = 0, skipSelfCollision = 0, skipNoUnits = 0;
+
     // Build per-village unit pools (copy of available units, decremented as we plan)
     var unitPools = {};
     for (var si = 0; si < sourceVillages.length; si++) {
@@ -500,21 +546,22 @@
           if (tmplLbl === 'B' && hasEnoughUnits(src.id, templateAUnits)) {
             tmplId = realTemplateA; tmplLbl = 'A'; tmplUnits = templateAUnits;
           } else {
+            skipNoUnits++;
             break; // No units left for any template from this village
           }
         }
 
         var travelMs = TWTools.travelTime(dist, LC_SPEED, ws, usf), estArr = nowMs + travelMs;
 
-        if (tgt.hasActiveAttack) continue;
+        if (tgt.hasActiveAttack) { skipActive++; continue; }
         if (tgt.lastReportMs > 0) {
           var since = nowMs - tgt.lastReportMs; if (since < 0) since += 86400000;
-          if (since < cdMs) continue;
+          if (since < cdMs) { skipCooldown++; continue; }
         }
-        if (hasCollision(tgt.coords, estArr)) continue;
+        if (hasCollision(tgt.coords, estArr)) { skipCollision++; continue; }
         var pf = planned[tgt.coords] || [], selfHit = false;
         for (var p = 0; p < pf.length; p++) { if (Math.abs(pf[p] - estArr) < cdMs) { selfHit = true; break; } }
-        if (selfHit) continue;
+        if (selfHit) { skipSelfCollision++; continue; }
 
         farmPlan.push({ sourceId: src.id, sourceName: src.name, sourceCoords: src.coords,
           targetId: tgt.id, targetCoords: tgt.coords, distance: dist,
@@ -525,6 +572,12 @@
         deductUnits(src.id, tmplUnits);
       }
     }
+    // Stash skip breakdown on the planner so the farm-table footer can show it.
+    planSkipStats = {
+      active: skipActive, cooldown: skipCooldown, collision: skipCollision,
+      selfCollision: skipSelfCollision, noUnits: skipNoUnits,
+      planned: farmPlan.length, sources: sourceVillages.length, targets: farmTargets.length
+    };
     if (statusCb) statusCb('Plan: ' + farmPlan.length + ' attacks across ' + sourceVillages.length + ' villages.');
     return farmPlan;
   }
@@ -691,7 +744,9 @@
     h += '</tbody></table>' +
       '<div style="padding:4px 10px;background:#e8d8a8;border:1px solid #804000;border-top:none;' +
         'border-radius:0 0 3px 3px;font-size:10px;color:#5a4a2a;">' +
-        '<span id="twf-sum">' + total + ' attacks planned. Click farm icon, press <b>Enter</b>, or <b>Start Farm</b> for auto-send (<b>Esc</b> stops).</span></div></div>';
+        '<span id="twf-sum">' + total + ' attacks planned. Click farm icon, press <b>Enter</b>, or <b>Start Farm</b> for auto-send (<b>Esc</b> stops).</span>' +
+        buildSkipBreakdown() +
+        '</div></div>';
 
     var $w = $('#am_widget_Farm');
     $w.length ? $w.before(h) : $('#contentContainer').prepend(h);
@@ -1032,10 +1087,38 @@
     startScanAndPlan();
   }
 
+  /**
+   * On TW mobile (body.mds), force the desktop layout via the same mobile=0
+   * cookie TW's own "Request desktop site" link sets, then reload. The Farm
+   * Assistant widget (#am_widget_Farm, #plunder_list, farm_icon_a/b markup)
+   * does not render in TW's mobile layout, so the script can't operate there.
+   *
+   * Returns true if a reload was triggered (caller must stop).
+   */
+  function forceDesktopIfMobile() {
+    try {
+      if (!document.body || !document.body.classList.contains('mds')) return false;
+      document.cookie = 'mobile=0; path=/; max-age=31536000';
+      window.location.reload();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
   $(function() {
-    if (!TWTools.getPlayerId()) return;
-    if (!ensureAmFarmPage()) return;
-    init();
+    if (forceDesktopIfMobile()) return;
+    // game_data may not be hydrated yet on slow page loads — wait briefly and
+    // retry once before giving up silently (no alerts on desktop).
+    function tryInit(attempt) {
+      if (TWTools.getPlayerId()) {
+        if (!ensureAmFarmPage()) return;
+        init();
+        return;
+      }
+      if (attempt < 10) setTimeout(function() { tryInit(attempt + 1); }, 200);
+    }
+    tryInit(0);
   });
 
-})(window, jQuery);
+})(window, window.jQuery || window.$ || jQuery);
