@@ -18,8 +18,31 @@
   var STORAGE_PREFIX = 'twf_';
   var LC_SPEED = 10;
   var LC_CARRY = 80;
+  /**
+   * Per-template filter shape. Two templates: A (default farm), B (wall-break).
+   * Each template's filters are independent. Planner tries A first, falls back
+   * to B if A is filtered out. Cooldown, distance, and unit pool are shared
+   * across templates because they're properties of the target/source village.
+   */
+  var DEFAULT_TEMPLATES = [
+    {
+      id: 'A', enabled: true, cooldownMin: 30, maxDist: 20, minLC: 5,
+      wallMin: 0, wallMax: 2,          // A: only target walls 0-2
+      minPoints: 0, playerFilter: 'both', // 'barb' | 'player' | 'both'
+      lootFilters: { green: true, yellow: true, red: true, blue: true }
+    },
+    {
+      id: 'B', enabled: true, cooldownMin: 60, maxDist: 15, minLC: 0,
+      wallMin: 1, wallMax: 99,         // B: wall-break — only target walls >= 1
+      minPoints: 0, playerFilter: 'both',
+      lootFilters: { green: false, yellow: true, red: true, blue: true }
+    }
+  ];
+
   var DEFAULT_SETTINGS = {
-    groupId: '0', maxDistance: 20, cooldownMinutes: 5, minLC: 5, useBForMaxLoot: true,
+    groupId: '0',
+    templates: DEFAULT_TEMPLATES,
+    maxPages: 0,  // 0 = all pages
     // Auto-farm: 'safe' jitters wider and inserts micro-pauses; 'raw' is the
     // literal request — uniform 500-800ms, no pauses. Raw mode is a clear bot
     // fingerprint and may get the account banned.
@@ -39,8 +62,69 @@
 
   // ---- Settings ----
   var settings = {};
-  function loadSettings() { settings = $.extend(true, {}, DEFAULT_SETTINGS, Store.get('settings', null) || {}); }
+  /** @type {boolean} True if settings were migrated from v1 — used for one-shot toast. */
+  var settingsMigrated = false;
+
+  /**
+   * Load settings + migrate v1 (flat cooldownMinutes/maxDistance/useBForMaxLoot)
+   * to v2 (templates[]). v1 values are mirrored onto Template A; B inherits
+   * defaults but stays enabled. Migration is idempotent.
+   */
+  function loadSettings() {
+    var raw = Store.get('settings', null) || {};
+    if (!raw.templates) {
+      var v1 = raw;
+      settingsMigrated = (typeof v1.cooldownMinutes !== 'undefined') || (typeof v1.maxDistance !== 'undefined');
+      var a = $.extend(true, {}, DEFAULT_TEMPLATES[0], {
+        cooldownMin: typeof v1.cooldownMinutes === 'number' ? v1.cooldownMinutes : DEFAULT_TEMPLATES[0].cooldownMin,
+        maxDist:     typeof v1.maxDistance     === 'number' ? v1.maxDistance     : DEFAULT_TEMPLATES[0].maxDist,
+        minLC:       typeof v1.minLC           === 'number' ? v1.minLC           : DEFAULT_TEMPLATES[0].minLC
+      });
+      var b = $.extend(true, {}, DEFAULT_TEMPLATES[1], {
+        enabled:     typeof v1.useBForMaxLoot  === 'boolean' ? v1.useBForMaxLoot : true,
+        cooldownMin: typeof v1.cooldownMinutes === 'number' ? v1.cooldownMinutes : DEFAULT_TEMPLATES[1].cooldownMin
+      });
+      raw.templates = [a, b];
+      delete raw.cooldownMinutes; delete raw.maxDistance; delete raw.useBForMaxLoot; delete raw.minLC;
+    }
+    settings = $.extend(true, {}, DEFAULT_SETTINGS, raw);
+    if (settingsMigrated) saveSettings();
+  }
   function saveSettings() { Store.set('settings', settings); }
+
+  /**
+   * Look up a template by id ('A' or 'B').
+   * @param {string} id
+   * @returns {Object|null}
+   */
+  function getTemplate(id) {
+    var ts = settings.templates || [];
+    for (var i = 0; i < ts.length; i++) if (ts[i].id === id) return ts[i];
+    return null;
+  }
+
+  /**
+   * Pure filter: does this target pass the template's filter rules?
+   * Cooldown, collision, distance, unit availability are checked elsewhere
+   * (they depend on source village + planner state, not the target alone).
+   *
+   * @param {Object} tgt - Farm target row.
+   * @param {Object} t - Template config from settings.templates[].
+   * @returns {boolean} True if the target passes all filters for this template.
+   */
+  function passesFilter(tgt, t) {
+    if (!t || !t.enabled) return false;
+    // Wall band — only enforce when we actually have a parsed wall level
+    if (typeof tgt.wallLevel === 'number') {
+      if (tgt.wallLevel < (t.wallMin || 0)) return false;
+      if (tgt.wallLevel > (typeof t.wallMax === 'number' ? t.wallMax : 99)) return false;
+    }
+    if ((t.minPoints || 0) > 0 && (tgt.points || 0) < t.minPoints) return false;
+    if (t.playerFilter === 'barb'   && tgt.playerName) return false;
+    if (t.playerFilter === 'player' && !tgt.playerName) return false;
+    if (tgt.lootStatus && t.lootFilters && t.lootFilters[tgt.lootStatus] === false) return false;
+    return true;
+  }
 
   // ---- State ----
   var sourceVillages = [], farmTargets = [], outgoingAttacks = [], farmPlan = [];
@@ -82,12 +166,16 @@
     var s = planSkipStats;
     if (!s) return '';
     var parts = [];
-    if (s.cooldown)      parts.push('<span title="last farm report within cooldown">cooldown: <b>' + s.cooldown + '</b></span>');
+    if (s.filter)        parts.push('<span title="target excluded by template filters (wall, loot color, player type, points)">filter: <b>' + s.filter + '</b></span>');
+    if (s.distance)      parts.push('<span title="target beyond every enabled template\'s max distance">distance: <b>' + s.distance + '</b></span>');
+    if (s.cooldown)      parts.push('<span title="last farm report within template cooldown">cooldown: <b>' + s.cooldown + '</b></span>');
     if (s.collision)     parts.push('<span title="another outgoing attack arrives within cooldown">collision: <b>' + s.collision + '</b></span>');
     if (s.selfCollision) parts.push('<span title="another planned attack this session arrives within cooldown">self-collision: <b>' + s.selfCollision + '</b></span>');
-    if (s.active)        parts.push('<span title="target already has an active attack from this village">active: <b>' + s.active + '</b></span>');
-    if (s.noUnits)       parts.push('<span title="source village ran out of units for the template">no-units: <b>' + s.noUnits + '</b></span>');
-    var meta = '<span style="color:#7a6840;">' + s.sources + ' sources × ' + s.targets + ' targets</span>';
+    if (s.active)        parts.push('<span title="target already has an active attack">active: <b>' + s.active + '</b></span>');
+    if (s.noUnits)       parts.push('<span title="source village ran out of units for any enabled template">no-units: <b>' + s.noUnits + '</b></span>');
+    var meta = '<span style="color:#7a6840;">' + s.sources + ' sources × ' + s.targets + ' targets';
+    if (s.pickedB) meta += ', <b>' + s.pickedB + '</b> via Template B (wall-break)';
+    meta += '</span>';
     var skipped = parts.length
       ? '<span style="margin-left:8px;color:#7a6840;">skipped: ' + parts.join(', ') + '</span>'
       : '';
@@ -264,10 +352,13 @@
 
     // Pagination: walk pages 1..N while parser finds links to higher Farm_page numbers.
     // currentPage starts at 0 (the live DOM); we fetch page=1, 2, 3, ... until parser
-    // says no link points beyond what we've fetched. Text-based "Next/>>" detection
+    // says no link points beyond what we've fetched, or until settings.maxPages
+    // worth of pages have been fetched (0 = no cap). Text-based "Next/>>" detection
     // doesn't work across locales (sk103 uses "Ďalšia" etc.).
     var currentPage = 0;
+    var maxPages = settings.maxPages || 0; // 0 = unlimited; we count pages fetched (incl. page 0)
     if (r0.maxPaginatedPage <= currentPage) { callback(targets); return; }
+    if (maxPages > 0 && (currentPage + 1) >= maxPages) { callback(targets); return; }
 
     (function fetchNext() {
       currentPage++;
@@ -278,7 +369,9 @@
           var rp = parseFarmTargets(html);
           targets = targets.concat(rp.targets);
           if (statusCb) statusCb('Farm targets: page ' + (currentPage + 1) + ' (' + targets.length + ')...');
-          if (rp.maxPaginatedPage > currentPage) setTimeout(fetchNext, 200);
+          var more = rp.maxPaginatedPage > currentPage;
+          var underCap = maxPages === 0 || (currentPage + 1) < maxPages;
+          if (more && underCap) setTimeout(fetchNext, 200);
           else callback(targets);
         },
         error: function() { callback(targets); }
@@ -456,8 +549,11 @@
   // PLANNING ENGINE
   // ============================================================
 
-  function hasCollision(tgtCoords, estArrival) {
-    var cdMs = settings.cooldownMinutes * 60000;
+  /**
+   * Check if any pending outgoing attack to this target arrives within the
+   * given cooldown window. Cooldown is now per-template, passed in.
+   */
+  function hasCollision(tgtCoords, estArrival, cdMs) {
     for (var i = 0; i < outgoingAttacks.length; i++) {
       var a = outgoingAttacks[i];
       if (a.targetCoords === tgtCoords && Math.abs(a.arrivalMs - estArrival) < cdMs) return true;
@@ -477,11 +573,27 @@
 
     var ws = 1, usf = 1;
     if (TWTools.DataFetcher._worldConfig) { ws = TWTools.DataFetcher._worldConfig.speed || 1; usf = TWTools.DataFetcher._worldConfig.unitSpeed || 1; }
-    var planned = {}, nowMs = TWTools.TimeSync.now(), cdMs = settings.cooldownMinutes * 60000;
+    var planned = {}, nowMs = TWTools.TimeSync.now();
 
     // Visible filter counters — surfaced in the farm-table footer so you can
     // see exactly why N targets were excluded from the plan.
-    var skipActive = 0, skipCooldown = 0, skipCollision = 0, skipSelfCollision = 0, skipNoUnits = 0;
+    var skipActive = 0, skipCooldown = 0, skipCollision = 0, skipSelfCollision = 0,
+        skipNoUnits = 0, skipFilter = 0, skipDistance = 0, pickedB = 0;
+
+    // Build the ordered template list: A first, then B. Each is paired with
+    // its FA template id + unit map so we can validate availability per attack.
+    var templates = [];
+    var tA = getTemplate('A'), tB = getTemplate('B');
+    if (tA && tA.enabled && realTemplateA !== null) {
+      templates.push({ cfg: tA, label: 'A', id: realTemplateA, units: templateAUnits });
+    }
+    if (tB && tB.enabled && realTemplateB !== null) {
+      templates.push({ cfg: tB, label: 'B', id: realTemplateB, units: templateBUnits });
+    }
+    if (!templates.length) {
+      if (statusCb) statusCb('No enabled templates with FA template ids — check settings.');
+      return farmPlan;
+    }
 
     // Build per-village unit pools (copy of available units, decremented as we plan)
     var unitPools = {};
@@ -523,59 +635,79 @@
       }
     }
 
+    // Largest maxDist across enabled templates — pre-filter targets by this
+    // upper bound so we don't compute the full filter chain for everything.
+    var globalMaxDist = 0;
+    for (var ti = 0; ti < templates.length; ti++) {
+      if (templates[ti].cfg.maxDist > globalMaxDist) globalMaxDist = templates[ti].cfg.maxDist;
+    }
+
     for (var i = 0; i < sourceVillages.length; i++) {
       var src = sourceVillages[i], byDist = [];
       for (var j = 0; j < farmTargets.length; j++) {
         var d = TWTools.distance(src.coordsParsed, farmTargets[j].coordsParsed);
-        if (d <= settings.maxDistance) byDist.push({ target: farmTargets[j], distance: d });
+        if (d <= globalMaxDist) byDist.push({ target: farmTargets[j], distance: d });
+        else skipDistance++;
       }
       byDist.sort(function(a, b) { return a.distance - b.distance; });
 
       for (var k = 0; k < byDist.length; k++) {
         var tgt = byDist[k].target, dist = byDist[k].distance;
-
-        // Determine template
-        var tmplId = realTemplateA, tmplLbl = 'A', tmplUnits = templateAUnits;
-        if (settings.useBForMaxLoot && tgt.maxLoot && realTemplateB !== null) {
-          tmplId = realTemplateB; tmplLbl = 'B'; tmplUnits = templateBUnits;
-        }
-
-        // Check if source has enough units for this template
-        if (!hasEnoughUnits(src.id, tmplUnits)) {
-          // If B template doesn't fit, try A as fallback
-          if (tmplLbl === 'B' && hasEnoughUnits(src.id, templateAUnits)) {
-            tmplId = realTemplateA; tmplLbl = 'A'; tmplUnits = templateAUnits;
-          } else {
-            skipNoUnits++;
-            break; // No units left for any template from this village
-          }
-        }
-
-        var travelMs = TWTools.travelTime(dist, LC_SPEED, ws, usf), estArr = nowMs + travelMs;
-
         if (tgt.hasActiveAttack) { skipActive++; continue; }
-        if (tgt.lastReportMs > 0) {
-          var since = nowMs - tgt.lastReportMs; if (since < 0) since += 86400000;
-          if (since < cdMs) { skipCooldown++; continue; }
+
+        // Try each template in order (A first, then B). First match wins.
+        var picked = null, pickedReason = '';
+        for (var ti2 = 0; ti2 < templates.length; ti2++) {
+          var T = templates[ti2];
+          if (dist > T.cfg.maxDist) { pickedReason = 'distance'; continue; }
+          if (!passesFilter(tgt, T.cfg)) { pickedReason = 'filter'; continue; }
+          if (!hasEnoughUnits(src.id, T.units)) { pickedReason = 'units'; continue; }
+
+          // Cooldown / collision use this template's cooldown window
+          var cdMs = T.cfg.cooldownMin * 60000;
+          if (tgt.lastReportMs > 0) {
+            var since = nowMs - tgt.lastReportMs; if (since < 0) since += 86400000;
+            if (since < cdMs) { pickedReason = 'cooldown'; continue; }
+          }
+          var travelMs = TWTools.travelTime(dist, LC_SPEED, ws, usf), estArr = nowMs + travelMs;
+          if (hasCollision(tgt.coords, estArr, cdMs)) { pickedReason = 'collision'; continue; }
+          var pf = planned[tgt.coords] || [], selfHit = false;
+          for (var p = 0; p < pf.length; p++) { if (Math.abs(pf[p] - estArr) < cdMs) { selfHit = true; break; } }
+          if (selfHit) { pickedReason = 'selfCollision'; continue; }
+
+          picked = { T: T, travelMs: travelMs, estArr: estArr };
+          break;
         }
-        if (hasCollision(tgt.coords, estArr)) { skipCollision++; continue; }
-        var pf = planned[tgt.coords] || [], selfHit = false;
-        for (var p = 0; p < pf.length; p++) { if (Math.abs(pf[p] - estArr) < cdMs) { selfHit = true; break; } }
-        if (selfHit) { skipSelfCollision++; continue; }
+
+        if (!picked) {
+          // Count the most-blocking reason for the highest-priority template
+          if      (pickedReason === 'filter')        skipFilter++;
+          else if (pickedReason === 'distance')      skipDistance++;
+          else if (pickedReason === 'units')         skipNoUnits++;
+          else if (pickedReason === 'cooldown')      skipCooldown++;
+          else if (pickedReason === 'collision')     skipCollision++;
+          else if (pickedReason === 'selfCollision') skipSelfCollision++;
+          continue;
+        }
+
+        if (picked.T.label === 'B') pickedB++;
 
         farmPlan.push({ sourceId: src.id, sourceName: src.name, sourceCoords: src.coords,
           targetId: tgt.id, targetCoords: tgt.coords, distance: dist,
-          templateId: tmplId, templateLabel: tmplLbl, travelTimeMs: travelMs, estArrival: fmtTime(estArr) });
+          templateId: picked.T.id, templateLabel: picked.T.label,
+          travelTimeMs: picked.travelMs, estArrival: fmtTime(picked.estArr),
+          wallLevel: tgt.wallLevel || 0 });
 
         if (!planned[tgt.coords]) planned[tgt.coords] = [];
-        planned[tgt.coords].push(estArr);
-        deductUnits(src.id, tmplUnits);
+        planned[tgt.coords].push(picked.estArr);
+        deductUnits(src.id, picked.T.units);
       }
     }
     // Stash skip breakdown on the planner so the farm-table footer can show it.
     planSkipStats = {
       active: skipActive, cooldown: skipCooldown, collision: skipCollision,
       selfCollision: skipSelfCollision, noUnits: skipNoUnits,
+      filter: skipFilter, distance: skipDistance, pickedB: pickedB,
       planned: farmPlan.length, sources: sourceVillages.length, targets: farmTargets.length
     };
     if (statusCb) statusCb('Plan: ' + farmPlan.length + ' attacks across ' + sourceVillages.length + ' villages.');
@@ -586,6 +718,51 @@
   // SETTINGS DIALOG — Dialog.show('TWFarm', html)
   // ============================================================
 
+  /**
+   * Render one template's filter row as an HTML table. Fields:
+   * enabled / cooldown / maxDist / minLC / wallMin / wallMax / minPoints /
+   * playerFilter / 4 loot-color checkboxes.
+   */
+  function buildTemplateRow(t) {
+    if (!t) return '';
+    var pid = 'twf-tpl-' + t.id;
+    var pfOpts = [
+      ['both',   'Any'],
+      ['barb',   'Barbs only'],
+      ['player', 'Players only']
+    ].map(function(p) {
+      return '<option value="' + p[0] + '"' + (t.playerFilter === p[0] ? ' selected' : '') + '>' + p[1] + '</option>';
+    }).join('');
+    var lf = t.lootFilters || { green: true, yellow: true, red: true, blue: true };
+    function lootBox(color, label, tip) {
+      return '<label title="' + tip + '" style="margin-right:6px;font-size:10px;">' +
+        '<input type="checkbox" id="' + pid + '-loot-' + color + '"' + (lf[color] !== false ? ' checked' : '') + '> ' +
+        '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + label + ';vertical-align:middle;"></span></label>';
+    }
+    return '<table class="vis" style="width:100%;margin-bottom:4px;">' +
+      '<tr class="row_b"><td colspan="2" style="background:#dac48c;font-weight:bold;font-size:11px;padding:3px 6px;">' +
+        '<label><input type="checkbox" id="' + pid + '-en"' + (t.enabled !== false ? ' checked' : '') +
+        '> Template <b>' + t.id + '</b> enabled</label></td></tr>' +
+      '<tr class="row_a"><td style="width:140px;font-size:10px;">Cooldown / Max dist / Min LC</td><td>' +
+        '<input type="number" id="' + pid + '-cd"   value="' + (t.cooldownMin || 0) + '" style="width:45px;" min="0" max="600"> min&nbsp; ' +
+        '<input type="number" id="' + pid + '-dist" value="' + (t.maxDist || 0)     + '" style="width:45px;" min="0" max="100"> fld&nbsp; ' +
+        '<input type="number" id="' + pid + '-lc"   value="' + (t.minLC || 0)       + '" style="width:45px;" min="0" max="999"> LC' +
+      '</td></tr>' +
+      '<tr class="row_b"><td style="font-size:10px;">Wall min..max / Min points</td><td>' +
+        '<input type="number" id="' + pid + '-wmin" value="' + (t.wallMin || 0)         + '" style="width:40px;" min="0" max="20"> .. ' +
+        '<input type="number" id="' + pid + '-wmax" value="' + (typeof t.wallMax === "number" ? t.wallMax : 99) + '" style="width:40px;" min="0" max="99">&nbsp; ' +
+        'pts ≥ <input type="number" id="' + pid + '-pts"  value="' + (t.minPoints || 0) + '" style="width:60px;" min="0" max="999999">' +
+      '</td></tr>' +
+      '<tr class="row_a"><td style="font-size:10px;">Player type / Loot status</td><td>' +
+        '<select id="' + pid + '-pf" style="font-size:10px;margin-right:8px;">' + pfOpts + '</select>' +
+        lootBox('green',  '#4a7a1e', 'Green — full haul') +
+        lootBox('yellow', '#c8a000', 'Yellow — partial haul') +
+        lootBox('red',    '#8a2020', 'Red — zero / no resources') +
+        lootBox('blue',   '#3060a0', 'Blue — unscouted / new') +
+      '</td></tr>' +
+    '</table>';
+  }
+
   function showSettingsDialog() {
     var grpOpts = '';
     for (var i = 0; i < availableGroups.length; i++) {
@@ -594,21 +771,17 @@
         esc(availableGroups[i].name) + '</option>';
     }
 
-    var h = '<div id="twf-dlg" style="padding:10px;min-width:320px;">' +
-      '<h3 style="margin:0 0 10px;font-size:13px;">TW Farm v' + VERSION + '</h3>' +
-      '<table class="vis" style="width:100%;">' +
+    var h = '<div id="twf-dlg" style="padding:10px;min-width:520px;">' +
+      '<h3 style="margin:0 0 8px;font-size:13px;">TW Farm v' + VERSION + '</h3>' +
+
+      // Global settings
+      '<table class="vis" style="width:100%;margin-bottom:8px;">' +
       '<tr class="row_a"><td style="width:140px;"><b>Village Group</b></td><td>' +
         '<select id="twf-d-grp" style="font-size:11px;">' + grpOpts + '</select></td></tr>' +
-      '<tr class="row_b"><td><b>Max Distance</b></td><td>' +
-        '<input type="number" id="twf-d-dist" value="' + settings.maxDistance + '" style="width:50px;" min="1" max="100"> fields</td></tr>' +
-      '<tr class="row_a"><td><b>Cooldown</b></td><td>' +
-        '<input type="number" id="twf-d-cd" value="' + settings.cooldownMinutes + '" style="width:50px;" min="0" max="60"> min</td></tr>' +
-      '<tr class="row_b"><td><b>Min LC/village</b></td><td>' +
-        '<input type="number" id="twf-d-lc" value="' + settings.minLC + '" style="width:50px;" min="1" max="500"></td></tr>' +
-      '<tr class="row_a"><td><b>Use B for max loot</b></td><td>' +
-        '<input type="checkbox" id="twf-d-useb"' + (settings.useBForMaxLoot ? ' checked' : '') + '> ' +
-        'Send Template B to full-haul targets</td></tr>' +
-      '<tr class="row_b"><td><b>Auto-send mode</b></td><td>' +
+      '<tr class="row_b"><td><b>Only load X pages</b></td><td>' +
+        '<input type="number" id="twf-d-maxpages" value="' + (settings.maxPages || 0) +
+        '" style="width:50px;" min="0" max="999"> (0 = all pages)</td></tr>' +
+      '<tr class="row_a"><td><b>Auto-send mode</b></td><td>' +
         '<select id="twf-d-automode" style="font-size:11px;">' +
           '<option value="safe"' + (settings.autoMode === 'safe' ? ' selected' : '') + '>' +
             'Safe (1.2-3.5s jitter, 5-10s pauses)</option>' +
@@ -617,16 +790,27 @@
         '</select>' +
         '<div id="twf-d-warn" style="display:' + (settings.autoMode === 'raw' ? 'block' : 'none') +
           ';margin-top:4px;padding:4px 6px;background:#fde0e0;border:1px solid #c08080;border-radius:2px;' +
-          'font-size:10px;color:#8a2020;">' +
-          '<b>Warning:</b> Raw mode is a bot fingerprint. Account ban risk.</div>' +
+          'font-size:10px;color:#8a2020;"><b>Warning:</b> Raw mode is a bot fingerprint. Account ban risk.</div>' +
       '</td></tr>' +
       '</table>' +
-      '<div style="padding:6px;background:#f0e0b0;border:1px solid #c0a060;border-radius:3px;margin:10px 0;font-size:10px;">' +
-        '<b>Templates:</b> A=' + (realTemplateA !== null ? realTemplateA : '<i>?</i>') +
+
+      // Per-template filter section
+      '<div style="font-weight:bold;margin:6px 0 4px;font-size:12px;">Templates</div>' +
+      buildTemplateRow(getTemplate('A')) +
+      '<div style="padding:4px 8px;background:#f0e0b0;border:1px solid #c0a060;border-radius:2px;margin:4px 0;font-size:10px;color:#5a4020;">' +
+        '<b>Template B — wall-break.</b> Configure it in Farm Assistant with axes + rams + catapults. ' +
+        'Lower its max distance — rams travel slowly. The script picks B when target wall ≥ B.wallMin.' +
+      '</div>' +
+      buildTemplateRow(getTemplate('B')) +
+
+      // Status banner
+      '<div style="padding:6px;background:#f0e0b0;border:1px solid #c0a060;border-radius:3px;margin:8px 0;font-size:10px;">' +
+        '<b>FA Templates:</b> A=' + (realTemplateA !== null ? realTemplateA : '<i>?</i>') +
         ', B=' + (realTemplateB !== null ? realTemplateB : '<i>?</i>') +
         ' | <b>Sources:</b> ' + sourceVillages.length +
         ' | <b>Targets:</b> ' + farmTargets.length +
       '</div>' +
+
       '<div style="text-align:center;">' +
         '<button class="btn" id="twf-d-save" style="margin-right:6px;">Save</button>' +
         '<button class="btn" id="twf-d-plan" style="font-weight:bold;padding:4px 16px;' +
@@ -649,12 +833,28 @@
 
   function readDlgSettings() {
     settings.groupId = $('#twf-d-grp').val() || '0';
-    settings.maxDistance = parseInt($('#twf-d-dist').val(), 10) || 20;
-    settings.cooldownMinutes = parseInt($('#twf-d-cd').val(), 10) || 5;
-    settings.minLC = parseInt($('#twf-d-lc').val(), 10) || 5;
-    settings.useBForMaxLoot = $('#twf-d-useb').is(':checked');
+    settings.maxPages = parseInt($('#twf-d-maxpages').val(), 10) || 0;
     var m = $('#twf-d-automode').val();
     if (m === 'safe' || m === 'raw') settings.autoMode = m;
+    ['A', 'B'].forEach(function(tid) {
+      var t = getTemplate(tid); if (!t) return;
+      var pid = '#twf-tpl-' + tid;
+      t.enabled     = $(pid + '-en').is(':checked');
+      t.cooldownMin = parseInt($(pid + '-cd').val(),   10) || 0;
+      t.maxDist     = parseInt($(pid + '-dist').val(), 10) || 0;
+      t.minLC       = parseInt($(pid + '-lc').val(),   10) || 0;
+      t.wallMin     = parseInt($(pid + '-wmin').val(), 10) || 0;
+      t.wallMax     = parseInt($(pid + '-wmax').val(), 10);
+      if (isNaN(t.wallMax)) t.wallMax = 99;
+      t.minPoints   = parseInt($(pid + '-pts').val(),  10) || 0;
+      t.playerFilter = $(pid + '-pf').val() || 'both';
+      t.lootFilters = {
+        green:  $(pid + '-loot-green').is(':checked'),
+        yellow: $(pid + '-loot-yellow').is(':checked'),
+        red:    $(pid + '-loot-red').is(':checked'),
+        blue:   $(pid + '-loot-blue').is(':checked')
+      };
+    });
   }
 
   // ============================================================
@@ -721,6 +921,7 @@
       '<table class="vis" id="twf-tbl" style="width:100%;border:1px solid #804000;">' +
       '<thead><tr>' +
         '<th style="width:30px;">#</th><th>Source</th><th>Target</th>' +
+        '<th style="text-align:right;width:35px;" title="Wall level">W</th>' +
         '<th style="text-align:right;width:50px;">Dist</th>' +
         '<th style="text-align:right;width:60px;">Travel</th>' +
         '<th style="text-align:center;width:40px;">Send</th>' +
@@ -729,10 +930,13 @@
     for (var i = 0; i < total; i++) {
       var pl = farmPlan[i], rc = i % 2 === 0 ? 'row_a' : 'row_b';
       var ic = pl.templateLabel === 'B' ? 'farm_icon_b' : 'farm_icon_a';
+      var wallStr = (typeof pl.wallLevel === 'number' && pl.wallLevel > 0) ?
+        '<b style="color:#8a4020;">' + pl.wallLevel + '</b>' : '<span style="color:#c0a060;">-</span>';
       h += '<tr class="' + rc + (i === 0 ? ' twf-act' : '') + '" id="twf-r-' + i + '" data-idx="' + i + '">' +
         '<td style="text-align:center;color:#7a6840;">' + (i + 1) + '</td>' +
         '<td>' + esc(pl.sourceName) + ' <span style="color:#7a6840;">(' + pl.sourceCoords + ')</span></td>' +
         '<td>(' + pl.targetCoords + ')</td>' +
+        '<td style="text-align:right;">' + wallStr + '</td>' +
         '<td style="text-align:right;">' + fmtDist(pl.distance) + '</td>' +
         '<td style="text-align:right;">' + fmtTravel(pl.travelTimeMs) + '</td>' +
         '<td style="text-align:center;">' +
@@ -1081,6 +1285,10 @@
 
     injectToolbarButton();
     TWTools.UI.toast('TW Farm v' + VERSION + ' — auto-running...', 'success');
+    if (settingsMigrated) {
+      TWTools.UI.toast('Settings upgraded to per-template (A/B). Review them via ⚙.', 'warning');
+      settingsMigrated = false;
+    }
 
     // Quickbar = one click. Scan + plan + auto-send fires now using saved
     // settings. Toolbar "TW Farm" button still opens the dialog for changes.

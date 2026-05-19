@@ -225,13 +225,17 @@ function check(label, cond, detail) {
     st.next >= 10 && st.next <= 20,
     `next=${st.next}`);
 
-  // ---- defaults sanity (read DEFAULT_SETTINGS literal from source) ----
+  // ---- defaults sanity (read DEFAULT_TEMPLATES + DEFAULT_SETTINGS from source) ----
+  // v2 settings split DEFAULT_TEMPLATES out as a separate const referenced by DEFAULT_SETTINGS.
   const farmSrc = fs.readFileSync(path.join(__dirname, '..', '..', 'scripts', 'tw-farm.js'), 'utf8');
+  const tMatch = farmSrc.match(/var DEFAULT_TEMPLATES = (\[[\s\S]*?\n  \]);/);
   const dsMatch = farmSrc.match(/var DEFAULT_SETTINGS = (\{[\s\S]*?\n  \});/);
-  check('defaults: DEFAULT_SETTINGS literal extractable', !!dsMatch);
-  if (dsMatch) {
-    // Strip line comments so eval can parse the literal.
-    const literal = dsMatch[1].replace(/\/\/[^\n]*/g, '');
+  check('defaults: DEFAULT_TEMPLATES literal extractable', !!tMatch);
+  check('defaults: DEFAULT_SETTINGS literal extractable',  !!dsMatch);
+  if (tMatch && dsMatch) {
+    // Compose then eval — DEFAULT_SETTINGS references DEFAULT_TEMPLATES by name.
+    const literal = `(function() { var DEFAULT_TEMPLATES = ${tMatch[1].replace(/\/\/[^\n]*/g, '')}; ` +
+      `return ${dsMatch[1].replace(/\/\/[^\n]*/g, '')}; })()`;
     // eslint-disable-next-line no-new-func
     const ds = (new Function('return ' + literal))();
     check('defaults: autoMode === safe', ds.autoMode === 'safe', `got=${ds.autoMode}`);
@@ -240,6 +244,10 @@ function check(label, cond, detail) {
     check('defaults: no session cap', !('autoSafeSessionCap' in ds), `unexpected key present`);
     check('defaults: safe pause 5000-10000', ds.autoSafePauseMin === 5000 && ds.autoSafePauseMax === 10000);
     check('defaults: safe burst 10-20', ds.autoSafeBurstMin === 10 && ds.autoSafeBurstMax === 20);
+    check('defaults: maxPages = 0 (unlimited)', ds.maxPages === 0);
+    check('defaults: templates array with A & B',
+      Array.isArray(ds.templates) && ds.templates.length === 2 &&
+      ds.templates[0].id === 'A' && ds.templates[1].id === 'B');
   }
 
   console.log(`\n${pass} pass, ${fail} fail`);
