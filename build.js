@@ -47,7 +47,14 @@ const STANDARD_LIBS = ['tw-core.js', 'tw-ui.js'];
  * @type {Object.<string, string[]>}
  */
 const SCRIPT_LIBS = {
-  'tw-snipe.js': ['tw-core.js', 'tw-ui.js', 'tw-commands.js']
+  'tw-snipe.js': ['tw-core.js', 'tw-ui.js', 'tw-commands.js'],
+  // Load order is canonical and significant: tw-core (window.TWTools + Storage)
+  // -> tw-ui (UI/toast) -> tw-commands (throws without window.TWTools) ->
+  // the new pure libs (overview-core before tw-table, which consumes its
+  // registry/predicates/comparators; tw-config-core before tw-table too).
+  // Not-yet-created libs are silently skipped by readFileOrNull/buildScript,
+  // so the build stays green while these land incrementally.
+  'tw-overview.js': ['tw-core.js', 'tw-ui.js', 'tw-commands.js', 'tw-overview-core.js', 'tw-config-core.js', 'tw-table.js']
 };
 
 /**
