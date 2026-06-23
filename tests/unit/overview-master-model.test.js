@@ -149,6 +149,37 @@ test('aggregateIncomingsByTarget groups command rows by target id (minimal)', ()
 });
 
 // ------------------------------------------------------------------
+// aggregateIncomingsByTarget — REAL impl (M6 / T37): per-target nukes/fakes/
+// nobles ESTIMATE (via classifyTrainKind over source-grouped trains) +
+// nearestSource. The nukesEst>0 result is what lights the purple pill.
+// ------------------------------------------------------------------
+test('aggregateIncomingsByTarget: nukes/fakes/nobles ESTIMATE per target + nearestSource', () => {
+  // Pre-classified units so the train classifier is deterministic (no travel math).
+  const rows = [
+    // target 2001: a nuke train (axe) from a near source, plus a noble.
+    { id: 2001, sourceCoords: '500|500', sourceName: 'OffA', player: 'Enemy1', distanceFloat: 3, unit: 'axe',  arrivalMs: 8000 },
+    { id: 2001, sourceCoords: '480|490', sourceName: 'NobleSrc', player: 'Enemy2', distanceFloat: 25, unit: 'snob', arrivalMs: 12000 },
+    // target 2001: a fake (lone scout) from a far source.
+    { id: 2001, sourceCoords: '900|900', sourceName: 'Spyhole', player: 'Enemy3', distanceFloat: 200, unit: 'spy', arrivalMs: 4000 },
+    // target 2002: a single fake.
+    { id: 2002, sourceCoords: '100|100', sourceName: 'Lone', player: 'Enemy4', distanceFloat: 50, unit: 'spy', arrivalMs: 7000 }
+  ];
+  const agg = core.aggregateIncomingsByTarget(rows);
+
+  assert.strictEqual(agg[2001].count, 3, 'three incomings to 2001');
+  assert.strictEqual(agg[2001].nukesEst, 1, 'one nuke train (axe)');
+  assert.strictEqual(agg[2001].noblesEst, 1, 'one noble train (snob)');
+  assert.strictEqual(agg[2001].fakesEst, 1, 'one fake train (lone scout)');
+  assert.strictEqual(agg[2001].incomingNuke, true, 'nukesEst>0 lights the purple pill');
+  assert.strictEqual(agg[2001].soonestMs, 4000, 'earliest of the three arrivals');
+  assert.ok(agg[2001].nearestSource, 'nearestSource present');
+  assert.strictEqual(agg[2001].nearestSource.coords, '500|500', 'nearest = smallest dist (3)');
+
+  assert.strictEqual(agg[2002].nukesEst, 0, 'no nuke at 2002');
+  assert.strictEqual(agg[2002].fakesEst, 1, 'single scout => fake');
+});
+
+// ------------------------------------------------------------------
 // INTEGRATION: real parser (FLAT unit keys) -> master model -> flags/power.
 // Guards the seam where computeDerivedFlags must read flat unit keys AND
 // populate the off/defPower registry columns (isolated specs used nested

@@ -1,16 +1,22 @@
 /**
- * TW Troop Overview v1.0.0
- * Military unit summary across all villages with troop aggregation and command overview.
+ * TW Village Overview v2.0.0
+ * Unified per-village intel dashboard: one master model JOINed by village id,
+ * surfaced through 8 tabs (Dashboard + Troops/Economy/Buildings/Incomings/Map +
+ * Commands + Settings), all driven by a declarative COLUMN registry and a generic
+ * table engine, with versioned config + saved view presets.
  *
  * Features:
- * - Troops tab: fetches combined overview, shows per-village unit counts with totals
- * - Commands tab: shows outgoing/incoming commands with filters
- * - Settings tab: archer toggle, nuke threshold, export format
- * - BBCode and CSV export
+ * - Dashboard tab: cross-domain column-toggle over the unified master model
+ * - Domain tabs (Troops/Economy/Buildings/Incomings/Map): each a built-in preset view
+ * - Commands tab: multi-sort, live countdown, BBCode/CSV export, fake/nuke ESTIMATE tags
+ * - Settings tab: thresholds, archers, export format, theme + saved view presets
+ * - Fetch All: sequential, single-lock, READ-ONLY across all domains
  * - NEVER auto-sends anything
  *
- * @version 1.1.0
- * @requires jQuery, TribalWars game environment, window.TWTools (tw-core.js, tw-ui.js)
+ * @version 2.0.0
+ * @requires jQuery, TribalWars game environment, window.TWTools
+ *           (tw-core.js, tw-ui.js, tw-commands.js, tw-overview-core.js,
+ *            tw-config-core.js, tw-table.js)
  */
 ;(function(window, $) {
   'use strict';
@@ -33,7 +39,7 @@
   // CONFIG & CONSTANTS
   // ============================================================
 
-  var VERSION = '1.1.0';
+  var VERSION = '2.0.0';
   var ID_PREFIX = 'two-';
   var STORAGE_PREFIX = 'two_';
 
@@ -78,43 +84,23 @@
   /** @type {string} World key for cache namespacing. */
   var currentWorldKey = detectWorldKey();
 
-  /**
-   * All unit types in standard TW display order.
-   * Archer units (archer, marcher) are conditionally displayed.
-   * @type {string[]}
-   */
-  var ALL_UNITS = ['spear', 'sword', 'axe', 'archer', 'spy', 'light', 'marcher', 'heavy', 'ram', 'catapult', 'knight', 'snob'];
-
-  /** Units without archers */
-  var UNITS_NO_ARCHERS = ['spear', 'sword', 'axe', 'spy', 'light', 'heavy', 'ram', 'catapult', 'knight', 'snob'];
-
-  /** Offensive units for power calculation */
-  var OFFENSIVE_UNITS = ['axe', 'light', 'ram', 'catapult'];
-
-  /** Defensive units for power calculation */
-  var DEFENSIVE_UNITS = ['spear', 'sword', 'heavy'];
-
-  /** Offensive archer units */
+  // Unit constant tables: the SINGLE source of truth lives in OverviewCore
+  // (moved verbatim there). Read them from the lib; fall back to local literals
+  // only if the lib is somehow absent (keeps the entry resilient).
+  var ALL_UNITS = OverviewCore.ALL_UNITS ||
+    ['spear', 'sword', 'axe', 'archer', 'spy', 'light', 'marcher', 'heavy', 'ram', 'catapult', 'knight', 'snob'];
+  var UNITS_NO_ARCHERS = OverviewCore.UNITS_NO_ARCHERS ||
+    ['spear', 'sword', 'axe', 'spy', 'light', 'heavy', 'ram', 'catapult', 'knight', 'snob'];
+  var OFFENSIVE_UNITS = OverviewCore.OFFENSIVE_UNITS || ['axe', 'light', 'ram', 'catapult'];
+  var DEFENSIVE_UNITS = OverviewCore.DEFENSIVE_UNITS || ['spear', 'sword', 'heavy'];
   var OFFENSIVE_ARCHER_UNITS = ['marcher'];
-
-  /** Defensive archer units */
   var DEFENSIVE_ARCHER_UNITS = ['archer'];
-
-  /**
-   * Offensive attack values per unit (used for power estimation).
-   * @type {Object.<string, number>}
-   */
-  var ATTACK_VALUES = {
+  var ATTACK_VALUES = OverviewCore.ATTACK_VALUES || {
     spear: 10, sword: 25, axe: 40, archer: 15,
     spy: 0, light: 130, marcher: 120, heavy: 150,
     ram: 2, catapult: 100, knight: 150, snob: 30
   };
-
-  /**
-   * General defense values per unit (infantry).
-   * @type {Object.<string, number>}
-   */
-  var DEF_VALUES = {
+  var DEF_VALUES = OverviewCore.DEF_VALUES || {
     spear: 15, sword: 50, axe: 10, archer: 50,
     spy: 2, light: 30, marcher: 40, heavy: 200,
     ram: 20, catapult: 8, knight: 250, snob: 100
@@ -126,26 +112,6 @@
     SUPPORT: 'support',
     RETURN: 'return',
     OTHER: 'other'
-  };
-
-  /**
-   * Available troop overview view types.
-   * Each entry maps a value (used in the URL type= param) to a display label.
-   * @type {Array.<{value: string, label: string}>}
-   */
-  var VIEW_TYPES = [
-    { value: 'own_home', label: 'Own (home)', urlType: 'own_home' },
-    { value: 'own_all', label: 'Own (all)', urlType: 'complete' },
-    { value: 'in_village', label: 'In village', urlType: 'there' },
-    { value: 'outside', label: 'Outside', urlType: 'away' },
-    { value: 'in_transit', label: 'In transit', urlType: 'moving' }
-  ];
-
-  /** Default settings */
-  var DEFAULT_SETTINGS = {
-    includeArchers: false,
-    nukeThreshold: 5000,
-    exportFormat: 'bbcode'
   };
 
   /** @type {string} Currently selected view type for troops overview */
@@ -276,54 +242,6 @@
     };
   }
 
-  /**
-   * Get the active list of unit types based on archer setting.
-   * @returns {string[]} Active unit type list.
-   */
-  function getActiveUnits() {
-    return settings.includeArchers ? ALL_UNITS : UNITS_NO_ARCHERS;
-  }
-
-  /**
-   * Get the display label for the currently selected view type.
-   * @returns {string} View type label.
-   */
-  function getViewLabel() {
-    for (var i = 0; i < VIEW_TYPES.length; i++) {
-      if (VIEW_TYPES[i].value === currentViewType) {
-        return VIEW_TYPES[i].label;
-      }
-    }
-    return 'Own (home)';
-  }
-
-  /**
-   * Get the URL type parameter for the currently selected view.
-   * Maps our internal view names to the game's actual URL type values.
-   * @returns {string} URL type parameter string (may include &filter_villages=1).
-   */
-  function getViewUrlParam() {
-    for (var i = 0; i < VIEW_TYPES.length; i++) {
-      if (VIEW_TYPES[i].value === currentViewType) {
-        return VIEW_TYPES[i].urlType + (VIEW_TYPES[i].urlExtra || '');
-      }
-    }
-    return 'own_home';
-  }
-
-  /**
-   * Get the display label for the currently selected group.
-   * @returns {string} Group label.
-   */
-  function getGroupLabel() {
-    for (var i = 0; i < availableGroups.length; i++) {
-      if (availableGroups[i].id === currentGroupId) {
-        return availableGroups[i].name;
-      }
-    }
-    return 'All villages';
-  }
-
   // ============================================================
   // DATA STRUCTURES
   // ============================================================
@@ -437,7 +355,7 @@
 
     // Always fetch type=complete — contains ALL 5 sub-rows per village
     var groupParam = (currentGroupId && currentGroupId !== '0') ? '&group=' + currentGroupId : '';
-    var allRows = [];
+    var matrices = [];
     var page = 0;
 
     function fetchPage() {
@@ -448,30 +366,41 @@
         dataType: 'html',
         timeout: 15000,
         success: function(html) {
-          var result = parseCompleteOverview(html, page);
+          // Delegate ALL parsing to the pure OverviewCore (DOM seam = extractRowMatrix).
+          var matrix = OverviewCore.extractRowMatrix(html, $);
 
-          // Handle empty group (no matching villages)
-          if (result.emptyGroup) {
+          // Empty group detection via the pure parser's emptyGroup signal.
+          var probe = OverviewCore.parseOverviewTable(matrix, OverviewCore.DOMAIN_CONFIGS.units);
+          if (probe.emptyGroup) {
             fetchLock = false;
-            allTroopData = splitIntoCategories([]);
-            allTroopData._emptyGroupMsg = result.emptyGroup;
+            allTroopData = OverviewCore.splitByCategory({ headers: [], rows: [] }, OverviewCore.DOMAIN_CONFIGS.units);
+            allTroopData._emptyGroupMsg = probe.emptyGroup;
             troopData = [];
             callback(troopData);
             return;
           }
 
-          allRows = allRows.concat(result.rows);
-
+          matrices.push(matrix);
           if (statusCb) {
-            statusCb('Loaded page ' + (page + 1) + ' (' + Math.floor(allRows.length / 5) + ' villages)...');
+            statusCb('Loaded page ' + (page + 1) + ' (' + (matrix.rows ? Math.floor(matrix.rows.length / 5) : 0) + ' villages)...');
           }
 
-          if (result.hasNextPage) {
+          if (probe.hasNextPage && page < 100) {
             page++;
             setTimeout(fetchPage, REQUEST_DELAY);
           } else {
             fetchLock = false;
-            allTroopData = splitIntoCategories(allRows);
+            // Merge all page matrices into one, then split into the 5 buckets (pure).
+            var merged = { headers: matrices[0] ? matrices[0].headers : [], rows: [] };
+            for (var p = 0; p < matrices.length; p++) {
+              if (matrices[p] && matrices[p].rows) merged.rows = merged.rows.concat(matrices[p].rows);
+            }
+            allTroopData = OverviewCore.splitByCategory(merged, OverviewCore.DOMAIN_CONFIGS.units);
+            // Compute derived isNuke/hasNoble flags across ALL 5 buckets.
+            OverviewCore.recomputeBucketsNuke(allTroopData, {
+              nukeThreshold: settings.nukeThreshold, includeArchers: settings.includeArchers
+            });
+            annotateBucketNobles(allTroopData);
             Store.setCache(cacheKey, allTroopData, troopsTtl);
             troopData = allTroopData[currentViewType] || [];
             callback(troopData);
@@ -489,226 +418,20 @@
   }
 
   /**
-   * Parse the complete overview page (type=complete) which has 5 sub-rows per village.
-   * Returns raw parsed rows with village info, label, and unit counts.
-   * @param {string} html - Raw HTML of the complete overview page.
-   * @param {number} page - Current page index for safety limit.
-   * @returns {{rows: Array, hasNextPage: boolean}} Raw row data and pagination flag.
+   * Annotate hasNoble on every bucket row (snob>0). isNuke is handled by
+   * OverviewCore.recomputeBucketsNuke; this fills the companion flag.
+   * @param {Object} buckets - allTroopData (5 buckets).
    */
-  function parseCompleteOverview(html, page) {
-    var $page = $('<div/>').html(html);
-    var rows = [];
-
-    // Check for "no villages in group" info box message
-    var $infoBox = $page.find('.info_box');
-    if ($infoBox.length > 0) {
-      var infoText = $infoBox.text().trim();
-      // TW shows this when group has 0 matching villages
-      if (infoText.indexOf('nepatr') !== -1 || infoText.indexOf('belong') !== -1 ||
-          infoText.indexOf('gehört') !== -1 || infoText.indexOf('no villages') !== -1) {
-        // Extract just the key message — find the sentence about the group name
-        // Pattern: "Žiadna z tvojich dedín nepatrí do "GroupName", aktuálne vybratej skupiny dedín."
-        var groupMatch = infoText.match(/[^.]*nepatr[^.]*\./);
-        var msg = groupMatch ? groupMatch[0].trim() : infoText.substring(0, 100);
-        return { rows: [], hasNextPage: false, emptyGroup: msg };
-      }
-    }
-
-    var $table = $page.find('#units_table, table.vis.overview_table');
-    if ($table.length === 0) {
-      $table = $page.find('table.vis').filter(function() {
-        return $(this).find('tr').length > 2;
-      }).first();
-    }
-
-    if ($table.length === 0) {
-      return { rows: [], hasNextPage: false };
-    }
-
-    // Parse header to identify unit columns (complete view always has proper headers)
-    var unitColumns = parseUnitHeaders($table);
-    var headerColumnCount = $table.find('tr:first th, thead th').length;
-
-    var currentVillageId = 0;
-    var currentVillageName = '';
-    var currentCoords = '';
-    var rowInBlock = 0; // 0-4 within each village's 5-row block
-
-    $table.find('tbody tr, tr').not(':first').each(function() {
-      var $row = $(this);
-      var $cells = $row.find('td');
-      if ($cells.length < 3) return;
-
-      // Check for village name link (contains coordinates)
-      var $villageLink = $();
-      $row.find('a[href*="village="]').each(function() {
-        var text = $.trim($(this).text());
-        if (text.match(/\(\d{1,3}\|\d{1,3}\)/)) {
-          $villageLink = $(this);
-          return false;
-        }
-      });
-
-      if ($villageLink.length > 0) {
-        var villageHref = $villageLink.attr('href') || '';
-        var villageIdMatch = villageHref.match(/village=(\d+)/);
-        if (villageIdMatch) {
-          currentVillageId = parseInt(villageIdMatch[1], 10);
-          var linkText = $.trim($villageLink.text());
-          var coordsMatch = linkText.match(/\((\d{1,3}\|\d{1,3})\)/);
-          currentCoords = coordsMatch ? coordsMatch[1] : '';
-          currentVillageName = linkText.replace(/\s*\(\d{1,3}\|\d{1,3}\)\s*K?\d*\s*$/, '').trim();
-          rowInBlock = 0; // Reset: first row of new village block
-        }
-      }
-
-      if (currentVillageId === 0) return;
-
-      // Detect label from cell text
-      var hasLink = $villageLink.length > 0;
-      var labelCell = $.trim(hasLink ? $cells.eq(1).text() : $cells.eq(0).text())
-        .toLowerCase().replace(/\s+/g, ' ');
-
-      // Map label to category, with modulo fallback
-      var category = LABEL_TO_CATEGORY[labelCell] || CATEGORY_ORDER[rowInBlock] || 'own_home';
-
-      // Parse unit counts.
-      // Parent rows (with village link) have same cell count as header → offset 0.
-      // Sub-rows (no village link) are always missing 1 cell at the start (village name).
-      // Some sub-rows also miss the action cell at the END, but that doesn't affect
-      // unit column offsets since it's after all unit columns.
-      // So offset is always: 0 for parent rows, 1 for sub-rows.
-      var cellOffset = hasLink ? 0 : 1;
-
-      var units = {};
-      var total = 0;
-      for (var unitType in unitColumns) {
-        if (unitColumns.hasOwnProperty(unitType)) {
-          var colIndex = unitColumns[unitType];
-          var adjustedIndex = colIndex - cellOffset;
-          if (adjustedIndex < 0) adjustedIndex = 0;
-          var cellText = $cells.eq(adjustedIndex).text();
-          var count = parseIntSafe(cellText);
-          units[unitType] = count;
-          if (ALL_UNITS.indexOf(unitType) !== -1) {
-            total += count;
-          }
-        }
-      }
-
-      rows.push({
-        id: currentVillageId,
-        name: currentVillageName || ('Village ' + currentCoords),
-        coords: currentCoords,
-        units: units,
-        total: total,
-        category: category
-      });
-
-      rowInBlock++;
-    });
-
-    // Pagination
-    var hasNextPage = false;
-    var $navItems = $page.find('.paged-nav-item');
-    if ($navItems.length > 1) {
-      var $current = $navItems.filter('.selected, .active');
-      if ($current.length > 0) {
-        hasNextPage = $current.next('.paged-nav-item').length > 0;
-      } else {
-        hasNextPage = $page.find('a.paged-nav-item[href*="page="]').length > 0;
-      }
-    }
-    if (page >= 100) hasNextPage = false;
-
-    return { rows: rows, hasNextPage: hasNextPage };
-  }
-
-  /**
-   * Split raw parsed rows into 5 category buckets and compute derived fields.
-   * @param {Array} rows - Raw rows from parseCompleteOverview.
-   * @returns {Object.<string, VillageTroops[]>} Map of category to village troop arrays.
-   */
-  function splitIntoCategories(rows) {
-    var buckets = {
-      own_home: {},
-      in_village: {},
-      outside: {},
-      in_transit: {},
-      own_all: {}
-    };
-
-    rows.forEach(function(row) {
-      var cat = row.category;
-      if (!buckets[cat]) return;
-
-      // Use village ID as key to deduplicate (pagination may overlap)
-      buckets[cat][row.id] = {
-        id: row.id,
-        name: row.name,
-        coords: row.coords,
-        units: row.units,
-        total: row.total
-      };
-    });
-
-    // Convert each bucket from map to array with derived fields
-    var result = {};
-    for (var cat in buckets) {
-      if (!buckets.hasOwnProperty(cat)) continue;
-      var arr = [];
-      for (var vid in buckets[cat]) {
-        if (!buckets[cat].hasOwnProperty(vid)) continue;
-        var v = buckets[cat][vid];
-        var offensiveCount = (v.units.axe || 0) + (v.units.light || 0);
-        if (settings.includeArchers) offensiveCount += (v.units.marcher || 0);
-        arr.push({
-          id: v.id,
-          name: v.name,
-          coords: v.coords,
-          units: v.units,
-          total: v.total,
-          isNuke: offensiveCount >= settings.nukeThreshold,
-          hasNoble: (v.units.snob || 0) > 0
-        });
-      }
-      result[cat] = arr;
-    }
-    return result;
-  }
-
-  /**
-   * Parse table headers to identify which column index maps to which unit type.
-   * TW uses unit icon images in the header: <img src="...unit/unit_spear.png">
-   * @param {jQuery} $table - The overview table.
-   * @returns {Object.<string, number>} Map of unit type to column index.
-   */
-  function parseUnitHeaders($table) {
-    var columns = {};
-    var $headerCells = $table.find('tr:first th, thead th');
-
-    $headerCells.each(function(index) {
-      var $th = $(this);
-      // Look for unit image in header
-      var $img = $th.find('img[src*="unit_"]');
-      if ($img.length > 0) {
-        var src = $img.attr('src') || '';
-        var unitMatch = src.match(/unit_(\w+)/);
-        if (unitMatch) {
-          var unitType = unitMatch[1];
-          columns[unitType] = index;
-        }
-      }
-
-      // Also check for class-based unit identification
-      var className = $th.attr('class') || '';
-      var classMatch = className.match(/unit-type-(\w+)/);
-      if (classMatch && !columns[classMatch[1]]) {
-        columns[classMatch[1]] = index;
+  function annotateBucketNobles(buckets) {
+    if (!buckets) return;
+    CATEGORY_ORDER.forEach(function(cat) {
+      var arr = buckets[cat];
+      if (!Array.isArray(arr)) return;
+      for (var i = 0; i < arr.length; i++) {
+        var u = arr[i] && arr[i].units;
+        arr[i].hasNoble = !!(u && (u.snob || 0) > 0);
       }
     });
-
-    return columns;
   }
 
   // ============================================================
@@ -823,6 +546,59 @@
     step();
   }
 
+  /**
+   * Clear all REAL per-domain overview caches (troop_all_g*, command_data, and
+   * every per-domain cacheKeyFor key) via the covered collectOverviewCacheKeys
+   * seam. The versioned config blob (two_config) is intentionally KEPT.
+   * Fixes the old no-op that cleared a never-written two_troop_data_<view> key.
+   */
+  function clearAllCaches() {
+    var groupIds = ['0'];
+    for (var i = 0; i < availableGroups.length; i++) {
+      if (availableGroups[i].id && groupIds.indexOf(availableGroups[i].id) === -1) {
+        groupIds.push(availableGroups[i].id);
+      }
+    }
+    if (currentGroupId && groupIds.indexOf(currentGroupId) === -1) groupIds.push(currentGroupId);
+
+    var keys = OverviewCore.collectOverviewCacheKeys
+      ? OverviewCore.collectOverviewCacheKeys(STORAGE_PREFIX, groupIds)
+      : [];
+    for (var k = 0; k < keys.length; k++) {
+      TWTools.Storage.remove(keys[k]);
+    }
+  }
+
+  /**
+   * Project the per-target incomings aggregate ({targetId: summary}) into an
+   * id-bearing {id: row} map with master-model field names, so buildMasterModel
+   * merges incCount / nukesEst / soonest / underDefended onto each village row.
+   * @param {Object} agg - OverviewCore.aggregateIncomingsByTarget output.
+   * @returns {Object.<string, Object>} {id: incomingsRow}.
+   */
+  function projectIncomingsToRows(agg) {
+    var out = {};
+    if (!agg || typeof agg !== 'object') return out;
+    for (var tid in agg) {
+      if (!agg.hasOwnProperty(tid)) continue;
+      var s = agg[tid];
+      var idNum = parseInt(tid, 10);
+      out[tid] = {
+        id: isNaN(idNum) ? tid : idNum,
+        incCount: s.count || 0,
+        soonest: s.soonestMs || 0,
+        nukesEst: s.nukesEst || 0,
+        fakesEst: s.fakesEst || 0,
+        noblesEst: s.noblesEst || 0,
+        // incomingNuke drives the purple pill; underDefended is finalized in
+        // computeDerivedFlags (defPower<threshold AND hasIncomings) during JOIN.
+        incomingNuke: (s.nukesEst || 0) > 0,
+        nearestSource: s.nearestSource ? (s.nearestSource.name || s.nearestSource.coords || '') : ''
+      };
+    }
+    return out;
+  }
+
   /** Index an array of rows by id into a {id: row} map. */
   function indexById(rows) {
     var map = {};
@@ -877,8 +653,11 @@
     },
     incomings: function(onProgress, done) {
       fetchOverviewMode('incomings', 'incomings&subtype=attacks', OverviewCore.DOMAIN_CONFIGS.incomings, true, onProgress, function(arr) {
-        // M3: aggregate per target (placeholder). Stash both raw + aggregate.
-        domainData.incomings = OverviewCore.aggregateIncomingsByTarget(arr);
+        // Aggregate per TARGET village (count + nukes/fakes/nobles ESTIMATE via
+        // classifyTrainKind), then project into id-bearing master rows so the
+        // incoming-nuke purple pill (nukesEst>0) + under-defended JOIN light up.
+        var agg = OverviewCore.aggregateIncomingsByTarget(arr, loadedUnitSpeeds, loadedWorldConfig);
+        domainData.incomings = projectIncomingsToRows(agg);
         domainData._incomingsRaw = arr;
         done();
       });
@@ -1124,156 +903,8 @@
   }
 
   // ============================================================
-  // CALCULATIONS
-  // ============================================================
-
-  /**
-   * Calculate aggregate totals for all troop types.
-   * @param {VillageTroops[]} data - Troop data array.
-   * @returns {Object.<string, number>} Total counts per unit type.
-   */
-  function calculateTroopTotals(data) {
-    var totals = {};
-    var units = getActiveUnits();
-    var i, j;
-
-    for (i = 0; i < units.length; i++) {
-      totals[units[i]] = 0;
-    }
-    totals.total = 0;
-
-    for (i = 0; i < data.length; i++) {
-      for (j = 0; j < units.length; j++) {
-        var u = units[j];
-        totals[u] += data[i].units[u] || 0;
-      }
-      totals.total += data[i].total || 0;
-    }
-
-    return totals;
-  }
-
-  /**
-   * Calculate army summary statistics.
-   * @param {VillageTroops[]} data - Troop data array.
-   * @returns {Object} Summary: offPower, defPower, nukeCount, nobleTrains.
-   */
-  function calculateArmySummary(data) {
-    var summary = {
-      offPower: 0,
-      defPower: 0,
-      nukeCount: 0,
-      nobleTrains: 0
-    };
-
-    var offUnits = OFFENSIVE_UNITS.concat(settings.includeArchers ? OFFENSIVE_ARCHER_UNITS : []);
-    var defUnits = DEFENSIVE_UNITS.concat(settings.includeArchers ? DEFENSIVE_ARCHER_UNITS : []);
-
-    for (var i = 0; i < data.length; i++) {
-      var v = data[i];
-      var j;
-
-      // Calculate offensive power
-      for (j = 0; j < offUnits.length; j++) {
-        var offUnit = offUnits[j];
-        summary.offPower += (v.units[offUnit] || 0) * (ATTACK_VALUES[offUnit] || 0);
-      }
-
-      // Calculate defensive power
-      for (j = 0; j < defUnits.length; j++) {
-        var defUnit = defUnits[j];
-        summary.defPower += (v.units[defUnit] || 0) * (DEF_VALUES[defUnit] || 0);
-      }
-
-      // Count nukes
-      if (v.isNuke) {
-        summary.nukeCount++;
-      }
-
-      // Count noble trains
-      if (v.hasNoble) {
-        summary.nobleTrains++;
-      }
-    }
-
-    return summary;
-  }
-
-  // ============================================================
-  // SORTING
-  // ============================================================
-
-  /** @type {string} Current troop sort column */
-  var troopSortColumn = 'name';
-
-  /** @type {boolean} Current troop sort direction */
-  var troopSortAsc = true;
-
-  /**
-   * Sort troop data by column.
-   * @param {VillageTroops[]} data - Data to sort.
-   * @param {string} column - Column key (unit type or 'name', 'total').
-   * @param {boolean} asc - Ascending if true.
-   * @returns {VillageTroops[]} Sorted copy.
-   */
-  function sortTroopData(data, column, asc) {
-    var sorted = data.slice();
-    sorted.sort(function(a, b) {
-      var va, vb;
-      if (column === 'name') {
-        va = a.name.toLowerCase();
-        vb = b.name.toLowerCase();
-        return asc ? va.localeCompare(vb) : vb.localeCompare(va);
-      }
-      if (column === 'total') {
-        va = a.total || 0;
-        vb = b.total || 0;
-      } else {
-        va = a.units[column] || 0;
-        vb = b.units[column] || 0;
-      }
-      return asc ? (va - vb) : (vb - va);
-    });
-    return sorted;
-  }
-
-  /**
-   * Handle sort click for troop table.
-   * @param {string} column - Column key.
-   */
-  function handleTroopSort(column) {
-    if (troopSortColumn === column) {
-      troopSortAsc = !troopSortAsc;
-    } else {
-      troopSortColumn = column;
-      troopSortAsc = true;
-    }
-  }
-
-  // ============================================================
   // FORMAT HELPERS
   // ============================================================
-
-  /**
-   * Format a number with dot-separated thousands.
-   * @param {number} n - Number to format.
-   * @returns {string} Formatted string.
-   */
-  function formatNum(n) {
-    if (typeof n !== 'number' || isNaN(n)) return '0';
-    return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, '.');
-  }
-
-  /**
-   * Parse an integer from text, stripping non-numeric characters.
-   * @param {string} text - Text containing a number.
-   * @returns {number} Parsed integer or 0.
-   */
-  function parseIntSafe(text) {
-    if (!text) return 0;
-    var cleaned = text.replace(/\./g, '').replace(/[^\d-]/g, '');
-    return parseInt(cleaned, 10) || 0;
-  }
 
   /**
    * Escape HTML special characters.
@@ -1286,20 +917,6 @@
               .replace(/</g, '&lt;')
               .replace(/>/g, '&gt;')
               .replace(/"/g, '&quot;');
-  }
-
-  /**
-   * Get short display name for a unit type.
-   * @param {string} unit - Unit type.
-   * @returns {string} Short abbreviation.
-   */
-  function unitShortName(unit) {
-    var names = {
-      spear: 'Spear', sword: 'Sword', axe: 'Axe', archer: 'Arch',
-      spy: 'Spy', light: 'LC', marcher: 'MA', heavy: 'HC',
-      ram: 'Ram', catapult: 'Cat', knight: 'Pala', snob: 'Noble'
-    };
-    return names[unit] || unit;
   }
 
   /**
@@ -1329,363 +946,386 @@
   }
 
   // ============================================================
-  // UI — TROOPS TAB
+  // UI — UNIFIED DOMAIN/DASHBOARD TABS (table-engine driven)
   // ============================================================
 
+  /** @type {Object.<string, Object>} Active Table controllers keyed by tab id. */
+  var tableControllers = {};
+
+  /** @type {?Object} The createCard handle (set in init). */
+  var overviewCard = null;
+
+  /** @type {Object.<string, boolean>} Which tabs have been rendered (lazy). */
+  var renderedTabs = {};
+
+  /** Domain tab id -> the registry domain name. */
+  var TAB_DOMAIN = {
+    troops: 'troops', economy: 'economy', buildings: 'buildings',
+    incomings: 'incomings', map: 'map'
+  };
+
   /**
-   * Render the troops tab content.
-   * @param {jQuery} $panel - Tab panel jQuery element.
-   * @param {VillageTroops[]} data - Troop data.
+   * Resolve the column descriptors for a domain tab as a built-in preset view:
+   * identity columns + that domain's columns, gated by the world config.
+   * @param {string} domain - troops|economy|buildings|incomings|map.
+   * @returns {Array.<Object>} Column descriptors.
    */
-  function renderTroops($panel, data) {
-    // Unbind all previous delegated handlers to prevent duplication on re-render
-    $panel.off('.twoview .twogroup .twobtn');
-    $panel.empty();
+  function presetColumnsForDomain(domain) {
+    var identity = OverviewCore.columnsForDomain('identity');
+    var domainCols = OverviewCore.columnsForDomain(domain);
+    var cols = identity.concat(domainCols);
+    var worldCfg = (config && config.world) || null;
+    return worldCfg ? OverviewCore.gateColumnsByWorld(cols, worldCfg) : cols;
+  }
 
-    // Build view selector dropdown HTML (reused in both states)
-    var viewSelectHtml = '<label style="font-size:10px;margin-left:8px;">View: ' +
-      '<select id="' + ID_PREFIX + 'view-type" style="font-size:10px;">';
-    for (var vi = 0; vi < VIEW_TYPES.length; vi++) {
-      viewSelectHtml += '<option value="' + VIEW_TYPES[vi].value + '"' +
-        (currentViewType === VIEW_TYPES[vi].value ? ' selected' : '') + '>' +
-        VIEW_TYPES[vi].label + '</option>';
+  /** Default-visible keys among a column set. */
+  function defaultVisibleKeys(cols) {
+    var keys = [];
+    for (var i = 0; i < cols.length; i++) {
+      if (cols[i] && cols[i].defaultVisible) keys.push(cols[i].key);
     }
-    viewSelectHtml += '</select></label>';
+    return keys;
+  }
 
-    // Build group selector dropdown HTML
-    var groupSelectHtml = '<label style="font-size:10px;margin-left:6px;">Group: ' +
-      '<select id="' + ID_PREFIX + 'group-id" style="font-size:10px;">';
-    for (var gi = 0; gi < availableGroups.length; gi++) {
-      groupSelectHtml += '<option value="' + availableGroups[gi].id + '"' +
-        (currentGroupId === availableGroups[gi].id ? ' selected' : '') + '>' +
-        escapeHtml(availableGroups[gi].name) + '</option>';
+  /**
+   * Build the "Fetch All" toolbar shared by the dashboard/domain tabs. Surfaces
+   * the premium-degrade note when present.
+   * @param {jQuery} $panel
+   * @param {string} tabId
+   * @returns {jQuery} The toolbar element.
+   */
+  function buildMasterToolbar($panel, tabId) {
+    var $bar = $('<div class="' + ID_PREFIX + 'toolbar" style="margin-bottom:6px;"></div>');
+    $bar.append('<button class="btn" id="' + ID_PREFIX + 'fetch-all" style="font-weight:bold;">Fetch All</button> ');
+    if (premiumNote) {
+      $bar.append('<span style="font-size:9px;color:#a05000;margin-left:6px;">' + escapeHtml(premiumNote) + '</span>');
     }
-    groupSelectHtml += '</select></label>';
+    $bar.find('#' + ID_PREFIX + 'fetch-all').on('click', function() {
+      doFetchAll(tabId);
+    });
+    return $bar;
+  }
 
-    /**
-     * Bind the view selector change event.
-     * Clears cache for the old view type, updates currentViewType, persists, and re-fetches.
-     * @param {jQuery} $container - Panel containing the selector.
-     * @private
-     */
-    function bindViewSelector($container) {
-      // Remove old handlers first to prevent duplicate binding on re-render
-      $container.off('change.twoview change.twogroup');
-      // View change: just switch the bucket (no re-fetch needed — all views cached)
-      $container.on('change.twoview', '#' + ID_PREFIX + 'view-type', function() {
-        currentViewType = $(this).val();
-        config = TWConfig.patch(localStore, { ui: { viewType: currentViewType } });
-        if (allTroopData[currentViewType]) {
-          troopData = allTroopData[currentViewType];
-          renderTroops($container, troopData);
-        } else {
-          troopData = [];
-          fetchTroopDataWithUI($container, false);
-        }
-      });
-      // Group change: must re-fetch (server-side filter)
-      $container.on('change.twogroup', '#' + ID_PREFIX + 'group-id', function() {
-        if (fetchLock) return; // Prevent concurrent fetches
-        currentGroupId = $(this).val();
-        config = TWConfig.patch(localStore, { ui: { groupId: currentGroupId } });
-        allTroopData = {};
-        troopData = [];
-        fetchTroopDataWithUI($container, true);
-      });
-    }
+  /** Per-domain visible-column persistence (config.domainColumns.<domain>). */
+  function resolveDomainVisible(domain, cols) {
+    var dc = (config && config.domainColumns && config.domainColumns[domain]) || null;
+    var defaults = defaultVisibleKeys(cols);
+    return OverviewCore.resolveVisibleColumns(dc, defaults);
+  }
+  function persistDomainVisible(domain, keys) {
+    var patch = { domainColumns: {} };
+    patch.domainColumns[domain] = keys;
+    config = TWConfig.patch(localStore, patch);
+  }
+  function domainSort(domain) {
+    var ds = (config && config.domainSort && config.domainSort[domain]) || null;
+    return Array.isArray(ds) ? ds : [];
+  }
+  function persistDomainSort(domain, sort) {
+    var patch = { domainSort: {} };
+    patch.domainSort[domain] = sort;
+    config = TWConfig.patch(localStore, patch);
+  }
 
-    if (!data || data.length === 0) {
-      // Show informative empty state — distinguish "not loaded" from "empty group"
-      var emptyMsg = 'No troop data. Click "Fetch Troops" to load.';
-      if (allTroopData && allTroopData._emptyGroupMsg) {
-        emptyMsg = allTroopData._emptyGroupMsg;
-      } else if (allTroopData && allTroopData.own_home && allTroopData.own_home.length === 0 && currentGroupId !== '0') {
-        emptyMsg = 'No villages found in group "' + getGroupLabel() + '".';
-      }
+  /**
+   * Render a DOMAIN tab (troops/economy/buildings/incomings/map): the master model
+   * rendered through the table engine with that domain's preset columns.
+   * @param {jQuery} $panel
+   * @param {string} tabId
+   */
+  function renderDomainTab($panel, tabId) {
+    $panel.off('.twdom').empty();
+    var domain = TAB_DOMAIN[tabId] || 'troops';
+    $panel.append(buildMasterToolbar($panel, tabId));
 
-      $panel.html(
-        '<div style="padding:8px;">' +
-        '<button class="btn" id="' + ID_PREFIX + 'fetch-troops" style="margin-bottom:8px;">Fetch Troops</button> ' +
-        '<button class="btn" id="' + ID_PREFIX + 'refresh-troops" style="margin-bottom:8px;">Force Refresh</button>' +
-        viewSelectHtml + groupSelectHtml +
-        '<p style="color:#7a6840;">' + escapeHtml(emptyMsg) + '</p>' +
-        '</div>'
-      );
-
-      // Bind fetch buttons (namespaced to prevent duplication)
-      $panel.on('click.twobtn', '#' + ID_PREFIX + 'fetch-troops', function() {
-        fetchTroopDataWithUI($panel, false);
-      });
-      $panel.on('click.twobtn', '#' + ID_PREFIX + 'refresh-troops', function() {
-        fetchTroopDataWithUI($panel, true);
-      });
-      bindViewSelector($panel);
+    if (!masterRows || masterRows.length === 0) {
+      $panel.append('<p style="padding:6px;color:#7a6840;">No data yet. Click "Fetch All" to build the unified model.</p>');
       return;
     }
 
-    var units = getActiveUnits();
-    var sorted = sortTroopData(data, troopSortColumn, troopSortAsc);
-    var totals = calculateTroopTotals(data);
-    var summary = calculateArmySummary(data);
+    var cols = presetColumnsForDomain(domain);
+    var visible = resolveDomainVisible(domain, cols);
+    var $host = $('<div class="' + ID_PREFIX + 'grid-host"></div>');
+    $panel.append($host);
 
-    // Sort arrow helper
-    var arrow = function(col) {
-      if (troopSortColumn === col) return troopSortAsc ? ' \u25B2' : ' \u25BC';
-      return '';
-    };
-
-    // Toolbar
-    var html = '<div style="margin-bottom:4px;">' +
-      '<button class="btn" id="' + ID_PREFIX + 'fetch-troops" style="font-size:9px;">Refresh</button> ' +
-      viewSelectHtml + groupSelectHtml + ' ' +
-      '<button class="btn" id="' + ID_PREFIX + 'export-bbcode" style="font-size:9px;">BBCode</button> ' +
-      '<button class="btn" id="' + ID_PREFIX + 'export-csv" style="font-size:9px;">CSV</button>' +
-      '</div>';
-
-    // Army summary box
-    html += '<div style="margin-bottom:6px;padding:4px;background:#f0e0b0;border:1px solid #c0a060;border-radius:2px;">' +
-      '<b>Army Summary</b> <span style="font-size:9px;color:#7a6840;">(' + escapeHtml(getViewLabel()) +
-        (currentGroupId !== '0' ? ' / ' + escapeHtml(getGroupLabel()) : '') + ')</span><br/>' +
-      'Offensive Power: <span style="color:#cc0000;font-weight:bold;">' + formatNum(summary.offPower) + '</span> &nbsp;|&nbsp; ' +
-      'Defensive Power: <span style="color:#2e7d32;font-weight:bold;">' + formatNum(summary.defPower) + '</span><br/>' +
-      'Nukes (' + settings.nukeThreshold + '+ off): <span style="font-weight:bold;">' + summary.nukeCount + '</span> &nbsp;|&nbsp; ' +
-      'Noble Trains: <span style="font-weight:bold;' + (summary.nobleTrains > 0 ? 'color:#804000;' : '') + '">' + summary.nobleTrains + '</span>' +
-      '</div>';
-
-    // Troop table
-    html += '<table class="vis" style="width:100%;table-layout:auto;">' +
-      '<thead><tr>' +
-      '<th class="' + ID_PREFIX + 'sort" data-col="name" style="cursor:pointer;white-space:nowrap;">Village' + arrow('name') + '</th>';
-
-    for (var h = 0; h < units.length; h++) {
-      html += '<th class="' + ID_PREFIX + 'sort" data-col="' + units[h] + '" style="cursor:pointer;text-align:right;white-space:nowrap;font-size:10px;">' +
-        unitShortName(units[h]) + arrow(units[h]) + '</th>';
-    }
-
-    html += '<th class="' + ID_PREFIX + 'sort" data-col="total" style="cursor:pointer;text-align:right;white-space:nowrap;">Total' + arrow('total') + '</th>' +
-      '</tr></thead><tbody>';
-
-    for (var i = 0; i < sorted.length; i++) {
-      var v = sorted[i];
-      var rowStyle = '';
-      if (v.isNuke) rowStyle = 'font-weight:bold;';
-      if (v.hasNoble) rowStyle += 'background:#fff0d0;';
-
-      html += '<tr style="' + rowStyle + '">' +
-        '<td><a href="/game.php?village=' + v.id + '&screen=overview" target="_blank">' + escapeHtml(v.name) + '</a>' +
-          (v.coords ? ' <span style="font-size:9px;color:#888;">(' + v.coords + ')</span>' : '') +
-          (v.isNuke ? ' <span style="color:#cc0000;font-size:9px;" title="Nuke village">\u2694</span>' : '') +
-          (v.hasNoble ? ' <span style="color:#804000;font-size:9px;" title="Has noble">\u265A</span>' : '') +
-        '</td>';
-
-      for (var u = 0; u < units.length; u++) {
-        var count = v.units[units[u]] || 0;
-        var cellStyle = count > 0 ? '' : 'color:#ccc;';
-        html += '<td style="text-align:right;font-size:10px;' + cellStyle + '">' + (count > 0 ? formatNum(count) : '-') + '</td>';
-      }
-
-      html += '<td style="text-align:right;font-weight:bold;">' + formatNum(v.total) + '</td>';
-      html += '</tr>';
-    }
-
-    // Totals row
-    html += '</tbody><tfoot><tr style="background:#e8d8a8;font-weight:bold;">' +
-      '<td>Total (' + data.length + ' villages)</td>';
-
-    for (var t = 0; t < units.length; t++) {
-      html += '<td style="text-align:right;font-size:10px;">' + formatNum(totals[units[t]] || 0) + '</td>';
-    }
-
-    html += '<td style="text-align:right;">' + formatNum(totals.total || 0) + '</td>';
-    html += '</tr></tfoot></table>';
-
-    $panel.html(html);
-
-    // Bind sort clicks
-    $panel.find('.' + ID_PREFIX + 'sort').on('click', function() {
-      var col = $(this).data('col');
-      handleTroopSort(col);
-      renderTroops($panel, data);
+    tableControllers[tabId] = TWTools.Table.render($host, masterRows, {
+      id: tabId,
+      columns: cols,
+      visibleColumns: visible,
+      sort: domainSort(domain),
+      title: 'Overview-' + tabId,
+      onVisibleChange: function(keys) { persistDomainVisible(domain, keys); },
+      onSortChange: function(sort) { persistDomainSort(domain, sort); }
     });
-
-    // Bind refresh (namespaced)
-    $panel.on('click.twobtn', '#' + ID_PREFIX + 'fetch-troops', function() {
-      fetchTroopDataWithUI($panel, true);
-    });
-
-    // Bind exports (namespaced)
-    $panel.on('click.twobtn', '#' + ID_PREFIX + 'export-bbcode', function() {
-      exportBBCode(data);
-    });
-    $panel.on('click.twobtn', '#' + ID_PREFIX + 'export-csv', function() {
-      exportCSV(data);
-    });
-
-    // Bind view selector
-    bindViewSelector($panel);
   }
 
   /**
-   * Fetch troop data with UI progress feedback.
-   * @param {jQuery} $panel - Tab panel.
-   * @param {boolean} force - Force refresh (ignore cache).
+   * Render the DASHBOARD tab: cross-domain column-toggle across ALL domains over
+   * the unified master model (resolveVisibleColumns over saved config).
+   * @param {jQuery} $panel
    */
-  function fetchTroopDataWithUI($panel, force) {
-    if (force) {
-      TWTools.Storage.remove(STORAGE_PREFIX + 'troop_all_g' + currentGroupId);
-      allTroopData = {};
-      troopData = [];
+  function renderDashboard($panel) {
+    $panel.off('.twdash').empty();
+    $panel.append(buildMasterToolbar($panel, 'dashboard'));
 
-      // Also refresh group list from game (dynamic groups may have changed)
-      TWTools.DataFetcher.fetchGroups(function(groups) {
-        availableGroups = groups;
-        var found = false;
-        for (var i = 0; i < groups.length; i++) {
-          if (groups[i].id === currentGroupId) { found = true; break; }
-        }
-        if (!found) currentGroupId = '0';
-        var $groupSelect = $panel.find('#' + ID_PREFIX + 'group-id');
-        if ($groupSelect.length > 0) {
-          $groupSelect.empty();
-          for (var j = 0; j < availableGroups.length; j++) {
-            $groupSelect.append(
-              $('<option/>').val(availableGroups[j].id).text(availableGroups[j].name)
-            );
-          }
-          $groupSelect.val(currentGroupId);
-        }
-      }, true); // forceRefresh = true
+    if (!masterRows || masterRows.length === 0) {
+      $panel.append('<p style="padding:6px;color:#7a6840;">No data yet. Click "Fetch All" to build the unified model.</p>');
+      return;
     }
 
-    $panel.html('<div style="padding:8px;"><p style="color:#7a6840;">Fetching troop data...</p></div>');
+    // ALL columns across every domain (identity + all domains), world-gated.
+    var allCols = OverviewCore.COLUMN_REGISTRY.slice();
+    var worldCfg = (config && config.world) || null;
+    if (worldCfg) allCols = OverviewCore.gateColumnsByWorld(allCols, worldCfg);
 
-    fetchTroopData(function(data) {
-      troopData = data;
-      renderTroops($panel, data);
-      if (data.length > 0) {
-        TWTools.UI.toast('Loaded troops from ' + data.length + ' villages', 'success');
+    // Visible keys from saved config.columns (resolveVisibleColumns), else defaults.
+    var saved = (config && config.columns && config.columns.visible) || [];
+    var defaults = defaultVisibleKeys(allCols);
+    var visible = OverviewCore.resolveVisibleColumns(saved, defaults);
+
+    var $host = $('<div class="' + ID_PREFIX + 'grid-host"></div>');
+    $panel.append($host);
+
+    tableControllers.dashboard = TWTools.Table.render($host, masterRows, {
+      id: 'dashboard',
+      columns: allCols,
+      visibleColumns: visible,
+      sort: (config && config.sort && config.sort.key)
+        ? [{ key: config.sort.key, dir: config.sort.dir || 'asc' }]
+        : [],
+      title: 'Dashboard',
+      onVisibleChange: function(keys) {
+        config = TWConfig.patch(localStore, { columns: { visible: keys } });
+      },
+      onSortChange: function(sort) {
+        var s = (sort && sort[0]) ? sort[0] : { key: 'name', dir: 'asc' };
+        config = TWConfig.patch(localStore, { sort: { key: s.key, dir: s.dir } });
       }
-    }, function(status) {
-      $panel.find('p').text(status);
     });
   }
 
+  /**
+   * Drive the Fetch-All orchestrator with progress, then re-render the active tab.
+   * @param {string} activeTabId
+   */
+  function doFetchAll(activeTabId) {
+    if (fetchLock) { TWTools.UI.toast('Fetch already in progress...', 'warning'); return; }
+    if (overviewCard) overviewCard.setStatus('Fetching all domains (sequential, read-only)...');
+    // Orchestrator domain names are: troops, econ, buildings, incomings, map
+    // (the 'economy' TAB maps to the 'econ' fetch domain).
+    runFetchAll(['troops', 'econ', 'buildings', 'incomings', 'map'],
+      function(status) { if (overviewCard) overviewCard.setStatus(status); },
+      function(rows) {
+        masterRows = rows;
+        renderedTabs = {}; // force lazy re-render of every tab
+        if (overviewCard) overviewCard.setStatus(rows.length + ' villages in the master model.');
+        activateTab(activeTabId);
+        TWTools.UI.toast('Fetch All complete: ' + rows.length + ' villages', 'success');
+      });
+  }
+
+  /**
+   * Recalculate isNuke status across ALL 5 view buckets AND the master rows
+   * (fixes the stale-flag bug where only the visible bucket was recomputed).
+   * Delegates to the covered OverviewCore.recomputeBucketsNuke seam.
+   */
+  function recalculateNukeStatus() {
+    var nukeOpts = { nukeThreshold: settings.nukeThreshold, includeArchers: settings.includeArchers };
+
+    // All 5 buckets (own_home, in_village, outside, in_transit, own_all).
+    if (OverviewCore.recomputeBucketsNuke) {
+      OverviewCore.recomputeBucketsNuke(allTroopData, nukeOpts);
+    }
+
+    // Re-flag the unified master rows too (drives the troops-tab nuke pill).
+    if (OverviewCore.classifyNukeFlag) {
+      for (var m = 0; m < masterRows.length; m++) {
+        var mr = masterRows[m];
+        if (mr) mr.isNuke = OverviewCore.classifyNukeFlag(mr.units || mr, nukeOpts);
+      }
+    }
+
+    // Keep the currently-displayed bucket pointer in sync.
+    troopData = allTroopData[currentViewType] || troopData;
+  }
+
   // ============================================================
-  // UI — COMMANDS TAB
+  // UI — COMMANDS TAB (multi-sort, live countdown, export, ESTIMATE tags)
   // ============================================================
 
   /** @type {string} Current command filter */
   var cmdFilter = 'all';
 
+  /** @type {?number} setInterval id for the live countdown (cleared on tab-away/close). */
+  var countdownTimer = null;
+
+  /** Stop the live countdown timer (idempotent). */
+  function stopCountdown() {
+    if (countdownTimer) {
+      clearInterval(countdownTimer);
+      countdownTimer = null;
+    }
+  }
+
   /**
-   * Render the commands tab content.
+   * Estimate the kind of a command (nuke/fake/noble) for the ESTIMATE tag column.
+   * Gated on get_config + get_unit_info being loaded first; never certainty.
+   * @param {Object} cmd - A command row.
+   * @returns {string} 'EST:nuke' | 'EST:fake' | 'EST:noble' | '' (ungated/unknown).
+   */
+  function estimateCommandTag(cmd) {
+    if (!worldConfigLoaded || !cmd) return '';
+    try {
+      var dist = (typeof cmd.distance === 'number') ? cmd.distance
+        : (cmd.sourceCoords && cmd.targetCoords)
+          ? TWTools.distance(OverviewCore.parseCoordsObj(cmd.sourceCoords), OverviewCore.parseCoordsObj(cmd.targetCoords))
+          : 0;
+      var kind = OverviewCore.classifyTrainKind(
+        { commands: [{ type: cmd.type, travelMs: cmd.travelMs, observedMs: cmd.arrivalMs, dist: dist }] },
+        loadedUnitSpeeds, loadedWorldConfig
+      );
+      if (kind.kind === 'unknown') return '';
+      return 'EST:' + kind.kind;
+    } catch (e) { return ''; }
+  }
+
+  /**
+   * Render the commands tab content with multi-sort, live countdown, export, and
+   * fake/nuke ESTIMATE tags. Keeps the LOCAL CMD_TYPE for the type column.
    * @param {jQuery} $panel - Tab panel jQuery element.
    * @param {CommandInfo[]} data - Command data.
    */
   function renderCommands($panel, data) {
-    $panel.empty();
+    stopCountdown();
+    $panel.off('.twcmd').empty();
 
-    // Toolbar with filters
     var html = '<div style="margin-bottom:6px;">' +
       '<button class="btn" id="' + ID_PREFIX + 'fetch-cmds" style="font-size:9px;">Fetch Commands</button> ' +
-      '<button class="btn" id="' + ID_PREFIX + 'refresh-cmds" style="font-size:9px;">Force Refresh</button>' +
+      '<button class="btn" id="' + ID_PREFIX + 'refresh-cmds" style="font-size:9px;">Force Refresh</button> ' +
+      '<button class="btn" id="' + ID_PREFIX + 'cmd-bbcode" style="font-size:9px;">BBCode</button> ' +
+      '<button class="btn" id="' + ID_PREFIX + 'cmd-csv" style="font-size:9px;">CSV</button>' +
       '</div>';
 
     if (!data || data.length === 0) {
       html += '<p style="padding:4px;color:#7a6840;">No command data. Click "Fetch Commands" to load.</p>';
       $panel.html(html);
-
-      $panel.on('click', '#' + ID_PREFIX + 'fetch-cmds', function() {
-        fetchCommandDataWithUI($panel, false);
-      });
-      $panel.on('click', '#' + ID_PREFIX + 'refresh-cmds', function() {
-        fetchCommandDataWithUI($panel, true);
-      });
+      $panel.on('click.twcmd', '#' + ID_PREFIX + 'fetch-cmds', function() { fetchCommandDataWithUI($panel, false); });
+      $panel.on('click.twcmd', '#' + ID_PREFIX + 'refresh-cmds', function() { fetchCommandDataWithUI($panel, true); });
       return;
     }
 
-    // Filter buttons
-    html += '<div style="margin-bottom:4px;">' +
-      '<b>Filter:</b> ' +
-      '<button class="btn ' + ID_PREFIX + 'cmd-filter' + (cmdFilter === 'all' ? ' selected' : '') + '" data-filter="all" style="font-size:9px;">All (' + data.length + ')</button> ';
+    // Multi-key sort via OverviewCore.sortBy (persisted in config.commandsSort).
+    var sortSpec = (config && config.commandsSort) || [{ key: 'arrivalMs', dir: 'asc', type: 'num' }];
+    var sorted = data.slice().sort(OverviewCore.sortBy(sortSpec));
 
-    var attackCount = 0, supportCount = 0, returnCount = 0;
-    for (var c = 0; c < data.length; c++) {
-      if (data[c].type === CMD_TYPE.ATTACK) attackCount++;
-      else if (data[c].type === CMD_TYPE.SUPPORT) supportCount++;
-      else if (data[c].type === CMD_TYPE.RETURN) returnCount++;
-    }
-
-    html += '<button class="btn ' + ID_PREFIX + 'cmd-filter' + (cmdFilter === CMD_TYPE.ATTACK ? ' selected' : '') +
-      '" data-filter="' + CMD_TYPE.ATTACK + '" style="font-size:9px;color:#cc0000;">Attacks (' + attackCount + ')</button> ';
-    html += '<button class="btn ' + ID_PREFIX + 'cmd-filter' + (cmdFilter === CMD_TYPE.SUPPORT ? ' selected' : '') +
-      '" data-filter="' + CMD_TYPE.SUPPORT + '" style="font-size:9px;color:#2e7d32;">Support (' + supportCount + ')</button> ';
-    html += '<button class="btn ' + ID_PREFIX + 'cmd-filter' + (cmdFilter === CMD_TYPE.RETURN ? ' selected' : '') +
-      '" data-filter="' + CMD_TYPE.RETURN + '" style="font-size:9px;color:#0066cc;">Return (' + returnCount + ')</button>';
-    html += '</div>';
-
-    // Filter data
-    var filtered = data;
-    if (cmdFilter !== 'all') {
-      filtered = [];
-      for (var f = 0; f < data.length; f++) {
-        if (data[f].type === cmdFilter) {
-          filtered.push(data[f]);
-        }
-      }
-    }
-
-    // Commands table
-    html += '<table class="vis" style="width:100%;">' +
-      '<thead><tr>' +
-      '<th style="width:60px;">Type</th>' +
-      '<th>Source</th>' +
-      '<th>Target</th>' +
-      '<th>Arrival</th>' +
+    html += '<table class="vis" style="width:100%;"><thead><tr>' +
+      '<th data-sort="type" style="cursor:pointer;">Type</th>' +
+      '<th data-sort="sourceName" style="cursor:pointer;">Source</th>' +
+      '<th data-sort="targetName" style="cursor:pointer;">Target</th>' +
+      '<th data-sort="arrivalMs" style="cursor:pointer;">Arrival</th>' +
+      '<th>Countdown</th>' +
+      '<th>EST</th>' +
       '<th>Units</th>' +
       '</tr></thead><tbody>';
 
-    if (filtered.length === 0) {
-      html += '<tr><td colspan="5" style="text-align:center;color:#888;">No commands matching filter.</td></tr>';
-    }
-
-    for (var i = 0; i < filtered.length; i++) {
-      var cmd = filtered[i];
+    for (var i = 0; i < sorted.length; i++) {
+      var cmd = sorted[i];
+      var typeName = cmdTypeName(cmd.type);
+      var estTag = estimateCommandTag(cmd);
       html += '<tr>' +
-        '<td style="color:' + cmdTypeColor(cmd.type) + ';font-weight:bold;font-size:10px;">' + cmdTypeName(cmd.type) + '</td>' +
-        '<td style="font-size:10px;">' + escapeHtml(cmd.sourceName) +
-          (cmd.sourceCoords ? ' <span style="color:#888;">(' + cmd.sourceCoords + ')</span>' : '') + '</td>' +
-        '<td style="font-size:10px;">' + escapeHtml(cmd.targetName) +
-          (cmd.targetCoords ? ' <span style="color:#888;">(' + cmd.targetCoords + ')</span>' : '') + '</td>' +
-        '<td style="font-size:10px;font-family:monospace;">' + escapeHtml(cmd.arrival) + '</td>' +
+        '<td style="color:' + cmdTypeColor(cmd.type) + ';font-weight:bold;font-size:10px;">' + escapeHtml(typeName) + '</td>' +
+        '<td style="font-size:10px;">' + escapeHtml(cmd.sourceName || '') +
+          (cmd.sourceCoords ? ' <span style="color:#888;">(' + escapeHtml(cmd.sourceCoords) + ')</span>' : '') + '</td>' +
+        '<td style="font-size:10px;">' + escapeHtml(cmd.targetName || '') +
+          (cmd.targetCoords ? ' <span style="color:#888;">(' + escapeHtml(cmd.targetCoords) + ')</span>' : '') + '</td>' +
+        '<td style="font-size:10px;font-family:monospace;">' + escapeHtml(cmd.arrivalText || '') + '</td>' +
+        '<td class="' + ID_PREFIX + 'countdown" data-arrival="' + (cmd.arrivalMs || 0) + '" style="font-size:10px;font-family:monospace;"></td>' +
+        '<td style="font-size:9px;color:#a05000;">' + escapeHtml(estTag) + '</td>' +
         '<td style="font-size:9px;color:#555;">' + escapeHtml(cmd.units || '-') + '</td>' +
         '</tr>';
     }
-
     html += '</tbody></table>';
-
-    // Support summary: aggregate incoming support by source player
-    if (supportCount > 0) {
-      html += '<div style="margin-top:8px;padding:4px;background:#f0e0b0;border:1px solid #c0a060;border-radius:2px;">' +
-        '<b>Support Overview</b> — ' + supportCount + ' support commands' +
-        '</div>';
-    }
-
     $panel.html(html);
 
-    // Bind filter clicks
-    $panel.find('.' + ID_PREFIX + 'cmd-filter').on('click', function() {
-      cmdFilter = $(this).data('filter');
+    // Live countdown — ONE setInterval re-rendering only the countdown cells.
+    function paintCountdowns() {
+      var now = TWTools.TimeSync ? TWTools.TimeSync.now() : Date.now();
+      $panel.find('.' + ID_PREFIX + 'countdown').each(function() {
+        var arrival = parseInt($(this).attr('data-arrival'), 10) || 0;
+        var remain = arrival - now;
+        $(this).text(remain > 0 ? formatCountdown(remain) : 'arrived');
+      });
+    }
+    paintCountdowns();
+    countdownTimer = setInterval(paintCountdowns, 1000);
+
+    // Header click -> multi-sort (shift-click appends).
+    $panel.on('click.twcmd', 'th[data-sort]', function(e) {
+      var key = $(this).attr('data-sort');
+      var type = (key === 'arrivalMs') ? 'num' : 'str';
+      sortSpec = toggleCommandSort(sortSpec, key, type, e.shiftKey);
+      config = TWConfig.patch(localStore, { commandsSort: sortSpec });
       renderCommands($panel, data);
     });
 
-    // Bind fetch/refresh
-    $panel.on('click', '#' + ID_PREFIX + 'fetch-cmds', function() {
-      fetchCommandDataWithUI($panel, false);
-    });
-    $panel.on('click', '#' + ID_PREFIX + 'refresh-cmds', function() {
-      fetchCommandDataWithUI($panel, true);
-    });
+    // Export the current sorted view via the LOCAL exporters.
+    $panel.on('click.twcmd', '#' + ID_PREFIX + 'cmd-bbcode', function() { exportCommandsBBCode(sorted); });
+    $panel.on('click.twcmd', '#' + ID_PREFIX + 'cmd-csv', function() { exportCommandsCSV(sorted); });
+    $panel.on('click.twcmd', '#' + ID_PREFIX + 'fetch-cmds', function() { fetchCommandDataWithUI($panel, false); });
+    $panel.on('click.twcmd', '#' + ID_PREFIX + 'refresh-cmds', function() { fetchCommandDataWithUI($panel, true); });
+  }
+
+  /** Toggle/append a command sort key (shift = additive multi-sort). */
+  function toggleCommandSort(spec, key, type, additive) {
+    spec = Array.isArray(spec) ? spec.slice() : [];
+    var idx = -1;
+    for (var i = 0; i < spec.length; i++) { if (spec[i].key === key) { idx = i; break; } }
+    if (additive) {
+      if (idx === -1) spec.push({ key: key, dir: 'asc', type: type });
+      else spec[idx].dir = spec[idx].dir === 'asc' ? 'desc' : 'asc';
+    } else {
+      if (idx === 0 && spec.length === 1) spec[0].dir = spec[0].dir === 'asc' ? 'desc' : 'asc';
+      else spec = [{ key: key, dir: 'asc', type: type }];
+    }
+    return spec;
+  }
+
+  /** Format a remaining-ms duration as HH:MM:SS. */
+  function formatCountdown(ms) {
+    var s = Math.floor(ms / 1000);
+    var h = Math.floor(s / 3600); s -= h * 3600;
+    var m = Math.floor(s / 60); s -= m * 60;
+    function pad(n) { return n < 10 ? '0' + n : '' + n; }
+    return pad(h) + ':' + pad(m) + ':' + pad(s);
+  }
+
+  /** Export the commands current view as BBCode (copied to clipboard). */
+  function exportCommandsBBCode(rows) {
+    if (!rows || !rows.length) { TWTools.UI.toast('No data to export', 'warning'); return; }
+    var bb = '[b]Commands[/b] (' + rows.length + ')\n[table]\n';
+    bb += '[**]Type[||]Source[||]Target[||]Arrival[/**]\n';
+    for (var i = 0; i < rows.length; i++) {
+      var c = rows[i];
+      bb += '[*]' + cmdTypeName(c.type) + '[|]' + (c.sourceName || '') + ' ' + (c.sourceCoords ? '(' + c.sourceCoords + ')' : '') +
+        '[|]' + (c.targetName || '') + ' ' + (c.targetCoords ? '(' + c.targetCoords + ')' : '') +
+        '[|]' + (c.arrivalText || '') + '[/*]\n';
+    }
+    bb += '[/table]';
+    copyToClipboard(bb);
+    TWTools.UI.toast('BBCode copied', 'success');
+  }
+
+  /** Export the commands current view as CSV (copied to clipboard). */
+  function exportCommandsCSV(rows) {
+    if (!rows || !rows.length) { TWTools.UI.toast('No data to export', 'warning'); return; }
+    var csv = 'Type,Source,SourceCoords,Target,TargetCoords,Arrival\n';
+    for (var i = 0; i < rows.length; i++) {
+      var c = rows[i];
+      csv += cmdTypeName(c.type) + ',"' + (c.sourceName || '').replace(/"/g, '""') + '",' + (c.sourceCoords || '') +
+        ',"' + (c.targetName || '').replace(/"/g, '""') + '",' + (c.targetCoords || '') + ',' + (c.arrivalText || '') + '\n';
+    }
+    copyToClipboard(csv);
+    TWTools.UI.toast('CSV copied', 'success');
   }
 
   /**
@@ -1698,9 +1338,7 @@
       TWTools.Storage.remove(STORAGE_PREFIX + 'command_data');
       commandData = [];
     }
-
     $panel.html('<div style="padding:8px;"><p style="color:#7a6840;">Fetching commands...</p></div>');
-
     fetchCommandData(function(data) {
       commandData = data;
       renderCommands($panel, data);
@@ -1713,204 +1351,177 @@
   }
 
   // ============================================================
-  // UI — SETTINGS TAB
+  // UI — SETTINGS TAB (config-bound form + saved view presets)
   // ============================================================
 
   /**
-   * Render the settings tab content.
+   * Render the settings tab: thresholds, archers, export format bound to the
+   * versioned config (NaN-safe coercion), plus the saved-views presets panel.
    * @param {jQuery} $panel - Tab panel jQuery element.
    */
   function renderSettings($panel) {
-    $panel.empty();
+    $panel.off('.twset .twviews').empty();
+    var t = (config && config.thresholds) || {};
+    var ui = (config && config.ui) || {};
 
     var html = '<div style="padding:4px;">' +
       '<h4 style="margin:0 0 8px;color:#3e2e14;">Settings</h4>' +
 
-      // Include archers
       '<div style="margin-bottom:6px;">' +
         '<label><input type="checkbox" id="' + ID_PREFIX + 'set-archers"' +
-          (settings.includeArchers ? ' checked' : '') + '> Include archer units (archer, mounted archer)</label>' +
+          (settings.includeArchers ? ' checked' : '') + '> Include archer units</label>' +
       '</div>' +
 
-      // Nuke threshold
-      '<div style="margin-bottom:6px;">' +
-        '<label>Nuke threshold (min off troops): ' +
-        '<input type="number" id="' + ID_PREFIX + 'set-nuke" value="' + settings.nukeThreshold +
-          '" style="width:60px;font-size:10px;" min="1000" max="50000" step="500">' +
-        '</label>' +
-      '</div>' +
+      '<div style="margin-bottom:6px;"><label>Nuke threshold (min off troops): ' +
+        '<input type="number" id="' + ID_PREFIX + 'set-nuke" value="' + (settings.nukeThreshold) +
+          '" style="width:70px;font-size:10px;" min="1000" max="50000" step="500"></label></div>' +
 
-      // Export format
-      '<div style="margin-bottom:6px;">' +
-        '<label>Export format: ' +
+      '<div style="margin-bottom:6px;"><label>Warehouse near-full %: ' +
+        '<input type="number" id="' + ID_PREFIX + 'set-whfull" value="' + (t.whNearFullPct !== undefined ? t.whNearFullPct : 90) +
+          '" style="width:60px;font-size:10px;" min="0" max="100" step="5"></label></div>' +
+
+      '<div style="margin-bottom:6px;"><label>Distance-to-front max: ' +
+        '<input type="number" id="' + ID_PREFIX + 'set-front" value="' + (t.distFrontMax !== undefined ? t.distFrontMax : 25) +
+          '" style="width:60px;font-size:10px;" min="1" max="200" step="1"></label></div>' +
+
+      '<div style="margin-bottom:6px;"><label>Export format: ' +
         '<select id="' + ID_PREFIX + 'set-export" style="font-size:10px;">' +
         '<option value="bbcode"' + (settings.exportFormat === 'bbcode' ? ' selected' : '') + '>BBCode</option>' +
         '<option value="csv"' + (settings.exportFormat === 'csv' ? ' selected' : '') + '>CSV</option>' +
-        '</select></label>' +
-      '</div>' +
+        '</select></label></div>' +
 
-      // Actions
+      '<div style="margin-bottom:6px;"><label>Theme: ' +
+        '<select id="' + ID_PREFIX + 'set-theme" style="font-size:10px;">' +
+        '<option value="parchment"' + ((ui.theme || 'parchment') === 'parchment' ? ' selected' : '') + '>Parchment</option>' +
+        '<option value="dark"' + (ui.theme === 'dark' ? ' selected' : '') + '>Dark</option>' +
+        '</select></label></div>' +
+
       '<div style="margin-top:12px;">' +
         '<button class="btn" id="' + ID_PREFIX + 'save-settings" style="font-weight:bold;">Save Settings</button> ' +
         '<button class="btn" id="' + ID_PREFIX + 'clear-cache" style="font-size:9px;">Clear Cache</button>' +
-      '</div>' +
-
-      // Info
-      '<div style="margin-top:12px;padding:4px;background:#f0e0b0;border:1px solid #c0a060;border-radius:2px;font-size:9px;color:#7a6840;">' +
-        'Troop Overview v' + VERSION + '<br/>' +
-        'Data is cached for 5 minutes.<br/>' +
-        'Use "Force Refresh" buttons to fetch fresh data.' +
-      '</div>' +
-
       '</div>';
+
+    // ---- Saved Views sub-panel ----
+    var views = (config && config.views) || [];
+    html += '<div style="margin-top:14px;padding:6px;background:#f0e0b0;border:1px solid #c0a060;border-radius:2px;">' +
+      '<b>Saved Views</b><br/>' +
+      '<select id="' + ID_PREFIX + 'view-preset" style="font-size:10px;margin:4px 0;">';
+    for (var v = 0; v < views.length; v++) {
+      var star = views[v].seed ? '⭐ ' : '';
+      html += '<option value="' + escapeHtml(views[v].name) + '">' + star + escapeHtml(views[v].name) + '</option>';
+    }
+    html += '</select><br/>' +
+      '<button class="btn" id="' + ID_PREFIX + 'view-apply" style="font-size:9px;">Apply</button> ' +
+      '<button class="btn" id="' + ID_PREFIX + 'view-save" style="font-size:9px;">Save</button> ' +
+      '<button class="btn" id="' + ID_PREFIX + 'view-delete" style="font-size:9px;">Delete</button> ' +
+      '<button class="btn" id="' + ID_PREFIX + 'view-rename" style="font-size:9px;">Rename</button><br/>' +
+      '<button class="btn" id="' + ID_PREFIX + 'view-export" style="font-size:9px;margin-top:4px;">Export config</button> ' +
+      '<button class="btn" id="' + ID_PREFIX + 'view-import" style="font-size:9px;margin-top:4px;">Import config</button>' +
+      '<textarea id="' + ID_PREFIX + 'view-json" style="width:100%;height:48px;font-size:9px;margin-top:4px;" ' +
+        'placeholder="Paste config/views JSON here, then Import"></textarea>' +
+      '</div>';
+
+    html += '<div style="margin-top:12px;padding:4px;background:#f0e0b0;border:1px solid #c0a060;border-radius:2px;font-size:9px;color:#7a6840;">' +
+      'Village Overview v' + VERSION + ' (config v' + (config ? config.cfgVersion : '?') + ')<br/>' +
+      'Per-domain caches: incomings 2m / troops 5m / econ+buildings 15m / map 1h.<br/>' +
+      'Clear Cache clears caches but KEEPS your config + saved views.' +
+      '</div></div>';
 
     $panel.html(html);
 
-    // Bind save
-    $panel.on('click', '#' + ID_PREFIX + 'save-settings', function() {
+    // Save handler — NaN-safe coercion via TWConfig.intOr/clampInt.
+    $panel.on('click.twset', '#' + ID_PREFIX + 'save-settings', function() {
       settings.includeArchers = $panel.find('#' + ID_PREFIX + 'set-archers').is(':checked');
-      settings.nukeThreshold = parseInt($panel.find('#' + ID_PREFIX + 'set-nuke').val(), 10) || 5000;
+      settings.nukeThreshold = TWConfig.clampInt(TWConfig.intOr($panel.find('#' + ID_PREFIX + 'set-nuke').val(), 5000), 1000, 50000);
       settings.exportFormat = $panel.find('#' + ID_PREFIX + 'set-export').val();
-      saveSettings();
-
-      // Recalculate nuke status for existing data
+      var whFull = TWConfig.clampInt(TWConfig.intOr($panel.find('#' + ID_PREFIX + 'set-whfull').val(), 90), 0, 100);
+      var front = TWConfig.clampInt(TWConfig.intOr($panel.find('#' + ID_PREFIX + 'set-front').val(), 25), 1, 200);
+      var theme = $panel.find('#' + ID_PREFIX + 'set-theme').val();
+      // NOTE: swapIfInverted hook reserved here for future min/max threshold pairs.
+      config = TWConfig.patch(localStore, {
+        ui: { includeArchers: settings.includeArchers, exportFormat: settings.exportFormat, theme: theme },
+        thresholds: { nukeThreshold: settings.nukeThreshold, whNearFullPct: whFull, distFrontMax: front }
+      });
       recalculateNukeStatus();
-
       TWTools.UI.toast('Settings saved', 'success');
     });
 
-    // Bind clear cache
-    $panel.on('click', '#' + ID_PREFIX + 'clear-cache', function() {
-      // Clear all view type caches
-      for (var ci = 0; ci < VIEW_TYPES.length; ci++) {
-        TWTools.Storage.remove(STORAGE_PREFIX + 'troop_data_' + VIEW_TYPES[ci].value);
-      }
-      TWTools.Storage.remove(STORAGE_PREFIX + 'command_data');
+    // Clear-Cache — REAL keys via collectOverviewCacheKeys; KEEP config.
+    $panel.on('click.twset', '#' + ID_PREFIX + 'clear-cache', function() {
+      clearAllCaches();
+      allTroopData = {};
       troopData = [];
       commandData = [];
+      masterRows = [];
+      domainData = {};
+      renderedTabs = {};
       TWTools.UI.toast('Cache cleared', 'success');
+    });
+
+    // ---- Saved Views handlers (namespaced, idempotent) ----
+    $panel.on('click.twviews', '#' + ID_PREFIX + 'view-apply', function() {
+      var name = $panel.find('#' + ID_PREFIX + 'view-preset').val();
+      var patch = TWConfig.applyView(config, name);
+      if (patch) {
+        config = TWConfig.patch(localStore, patch);
+        renderedTabs = {};
+        activateTab((config.ui && config.ui.activeTab) || 'dashboard');
+        TWTools.UI.toast('Applied view: ' + name, 'success');
+      }
+    });
+    $panel.on('click.twviews', '#' + ID_PREFIX + 'view-save', function() {
+      var name = prompt('Save current view as:', 'My view');
+      if (!name) return;
+      var visible = (config && config.columns && config.columns.visible) || [];
+      var filters = (config && config.filters) || [];
+      var sort = (config && config.sort) || { key: 'name', dir: 'asc' };
+      TWConfig.saveView(config, { name: name, visibleColumns: visible, filters: filters, sort: sort, group: currentGroupId });
+      TWConfig.save(localStore, config);
+      renderSettings($panel);
+      TWTools.UI.toast('View saved: ' + name, 'success');
+    });
+    $panel.on('click.twviews', '#' + ID_PREFIX + 'view-delete', function() {
+      var name = $panel.find('#' + ID_PREFIX + 'view-preset').val();
+      TWConfig.deleteView(config, name);
+      TWConfig.save(localStore, config);
+      renderSettings($panel);
+      TWTools.UI.toast('View deleted: ' + name, 'success');
+    });
+    $panel.on('click.twviews', '#' + ID_PREFIX + 'view-rename', function() {
+      var oldName = $panel.find('#' + ID_PREFIX + 'view-preset').val();
+      var newName = prompt('Rename view to:', oldName);
+      if (!newName) return;
+      var before = config.views.length;
+      var renamed = TWConfig.renameView(config, oldName, newName);
+      if (renamed === config && before === config.views.length) {
+        TWTools.UI.toast('Rename failed (name collision?)', 'warning');
+      } else {
+        config = renamed;
+        TWConfig.save(localStore, config);
+        renderSettings($panel);
+        TWTools.UI.toast('View renamed', 'success');
+      }
+    });
+    $panel.on('click.twviews', '#' + ID_PREFIX + 'view-export', function() {
+      copyToClipboard(TWConfig.exportConfig ? TWConfig.exportConfig(config) : JSON.stringify(config));
+      TWTools.UI.toast('Config copied to clipboard', 'success');
+    });
+    $panel.on('click.twviews', '#' + ID_PREFIX + 'view-import', function() {
+      var json = $panel.find('#' + ID_PREFIX + 'view-json').val();
+      if (TWConfig.importConfig) {
+        config = TWConfig.importConfig(localStore, json) || config;
+      } else if (TWConfig.importViews) {
+        config = TWConfig.importViews(config, json);
+        TWConfig.save(localStore, config);
+      }
+      renderSettings($panel);
+      TWTools.UI.toast('Config imported', 'success');
     });
   }
 
-  /**
-   * Recalculate isNuke status for all villages based on current settings.
-   */
-  function recalculateNukeStatus() {
-    for (var i = 0; i < troopData.length; i++) {
-      var v = troopData[i];
-      var offCount = (v.units.axe || 0) + (v.units.light || 0);
-      if (settings.includeArchers) {
-        offCount += (v.units.marcher || 0);
-      }
-      v.isNuke = offCount >= settings.nukeThreshold;
-    }
-  }
-
   // ============================================================
-  // EXPORT FUNCTIONS
+  // CLIPBOARD
   // ============================================================
-
-  /**
-   * Export troop data as BBCode and copy to clipboard.
-   * @param {VillageTroops[]} data - Troop data.
-   */
-  function exportBBCode(data) {
-    if (!data || data.length === 0) {
-      TWTools.UI.toast('No data to export', 'warning');
-      return;
-    }
-
-    var units = getActiveUnits();
-    var totals = calculateTroopTotals(data);
-    var summary = calculateArmySummary(data);
-
-    var bb = '[b]Troop Overview[/b] (' + data.length + ' villages, ' + getViewLabel() + ')\n\n';
-
-    // Summary
-    bb += '[b]Army Summary:[/b]\n';
-    bb += 'Offensive Power: ' + formatNum(summary.offPower) + '\n';
-    bb += 'Defensive Power: ' + formatNum(summary.defPower) + '\n';
-    bb += 'Nukes: ' + summary.nukeCount + ' | Noble Trains: ' + summary.nobleTrains + '\n\n';
-
-    // Table — TW BBCode format:
-    //   [**]Header1[||]Header2[||]Header3[/**]
-    //   [*]Cell1[|]Cell2[|]Cell3[/*]
-    bb += '[table]\n';
-
-    // Header row
-    var headerCells = ['Village'];
-    for (var h = 0; h < units.length; h++) {
-      headerCells.push(unitShortName(units[h]));
-    }
-    headerCells.push('Total');
-    bb += '[**]' + headerCells.join('[||]') + '[/**]\n';
-
-    // Data rows — replace 0 with "-" for readability
-    for (var i = 0; i < data.length; i++) {
-      var v = data[i];
-      var rowCells = [v.name + ' (' + v.coords + ')'];
-      for (var u = 0; u < units.length; u++) {
-        var count = v.units[units[u]] || 0;
-        rowCells.push(count > 0 ? String(count) : '-');
-      }
-      rowCells.push(String(v.total));
-      bb += '[*]' + rowCells.join('[|]') + '[/*]\n';
-    }
-
-    // Totals row
-    var totalCells = ['[b]TOTAL[/b]'];
-    for (var t = 0; t < units.length; t++) {
-      totalCells.push('[b]' + formatNum(totals[units[t]] || 0) + '[/b]');
-    }
-    totalCells.push('[b]' + formatNum(totals.total || 0) + '[/b]');
-    bb += '[*]' + totalCells.join('[|]') + '[/*]\n';
-
-    bb += '[/table]';
-
-    copyToClipboard(bb);
-    TWTools.UI.toast('BBCode copied to clipboard', 'success');
-  }
-
-  /**
-   * Export troop data as CSV and copy to clipboard.
-   * @param {VillageTroops[]} data - Troop data.
-   */
-  function exportCSV(data) {
-    if (!data || data.length === 0) {
-      TWTools.UI.toast('No data to export', 'warning');
-      return;
-    }
-
-    var units = getActiveUnits();
-    var totals = calculateTroopTotals(data);
-
-    // Header
-    var csv = 'Village,Coords';
-    for (var h = 0; h < units.length; h++) {
-      csv += ',' + unitShortName(units[h]);
-    }
-    csv += ',Total\n';
-
-    // Data rows
-    for (var i = 0; i < data.length; i++) {
-      var v = data[i];
-      csv += '"' + v.name.replace(/"/g, '""') + '",' + v.coords;
-      for (var u = 0; u < units.length; u++) {
-        csv += ',' + (v.units[units[u]] || 0);
-      }
-      csv += ',' + v.total + '\n';
-    }
-
-    // Totals
-    csv += 'TOTAL,';
-    for (var t = 0; t < units.length; t++) {
-      csv += ',' + (totals[units[t]] || 0);
-    }
-    csv += ',' + (totals.total || 0) + '\n';
-
-    copyToClipboard(csv);
-    TWTools.UI.toast('CSV copied to clipboard', 'success');
-  }
 
   /**
    * Copy text to clipboard using modern API with fallback.
@@ -1918,9 +1529,7 @@
    */
   function copyToClipboard(text) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).catch(function() {
-        fallbackCopyToClipboard(text);
-      });
+      navigator.clipboard.writeText(text).catch(function() { fallbackCopyToClipboard(text); });
     } else {
       fallbackCopyToClipboard(text);
     }
@@ -1931,104 +1540,152 @@
    * @param {string} text - Text to copy.
    */
   function fallbackCopyToClipboard(text) {
-    var $textarea = $('<textarea/>')
-      .val(text)
-      .css({ position: 'fixed', opacity: 0, left: '-9999px' })
-      .appendTo('body');
-
+    var $textarea = $('<textarea/>').val(text)
+      .css({ position: 'fixed', opacity: 0, left: '-9999px' }).appendTo('body');
     $textarea[0].select();
-
     try {
       document.execCommand('copy');
     } catch (e) {
       TWTools.UI.toast('Failed to copy. Please copy manually.', 'error');
     }
-
     $textarea.remove();
   }
 
   // ============================================================
-  // MAIN CARD INITIALIZATION
+  // MAIN CARD INITIALIZATION (8 tabs, lazy render)
   // ============================================================
 
+  /** @type {Array.<{id:string,label:string}>} The 8 tabs. */
+  var TABS = [
+    { id: 'dashboard', label: 'Dashboard' },
+    { id: 'troops', label: 'Troops' },
+    { id: 'economy', label: 'Economy' },
+    { id: 'buildings', label: 'Buildings' },
+    { id: 'incomings', label: 'Incomings' },
+    { id: 'map', label: 'Map' },
+    { id: 'commands', label: 'Commands' },
+    { id: 'settings', label: 'Settings' }
+  ];
+
+  /** @type {boolean} Whether get_config/get_unit_info are loaded (gates ESTIMATE). */
+  var worldConfigLoaded = false;
+  var loadedWorldConfig = null;
+  var loadedUnitSpeeds = null;
+
   /**
-   * Initialize the Troop Overview card widget.
+   * Activate (and lazily render) a tab by id. Domain tabs render the master model;
+   * dashboard renders cross-domain; commands/settings render their own panels.
+   * @param {string} tabId
+   */
+  function activateTab(tabId) {
+    if (!overviewCard) return;
+    var $panel = overviewCard.getTabContent(tabId);
+    if (!$panel || !$panel.length) return;
+
+    if (tabId !== 'commands') stopCountdown(); // leaving Commands stops the timer
+
+    if (renderedTabs[tabId]) {
+      // Already rendered once; refresh only commands (live data) on revisit.
+      if (tabId === 'commands') renderCommands($panel, commandData);
+      return;
+    }
+    renderedTabs[tabId] = true;
+
+    if (tabId === 'dashboard') renderDashboard($panel);
+    else if (TAB_DOMAIN[tabId]) renderDomainTab($panel, tabId);
+    else if (tabId === 'commands') renderCommands($panel, commandData);
+    else if (tabId === 'settings') renderSettings($panel);
+  }
+
+  /**
+   * Initialize the Village Overview card widget (8 tabs, ~1000x580, resizable).
    */
   function init() {
     loadSettings();
 
-    // Fetch available village groups in background (populates dropdown)
+    // Load world config + unit info to gate the fake/nuke ESTIMATE (read-only).
+    try {
+      TWTools.DataFetcher.fetchWorldConfig(function(cfg) {
+        loadedWorldConfig = cfg || { speed: 1, unitSpeed: 1 };
+        TWTools.DataFetcher.fetchUnitInfo(function(speeds) {
+          loadedUnitSpeeds = speeds || OverviewCore.DEFAULT_UNIT_SPEEDS;
+          worldConfigLoaded = true;
+          // Stash gating world flags onto config for column gating.
+          config = TWConfig.patch(localStore, { world: gateFlagsFromWorldConfig(loadedWorldConfig) });
+        });
+      });
+    } catch (e) { /* world config optional — ESTIMATE simply stays ungated */ }
+
+    // Fetch available village groups in background (populates group state).
     TWTools.DataFetcher.fetchGroups(function(groups) {
       availableGroups = groups;
-      // Validate saved group ID still exists
       var found = false;
       for (var i = 0; i < groups.length; i++) {
         if (groups[i].id === currentGroupId) { found = true; break; }
       }
       if (!found) currentGroupId = '0';
-      // Re-render group dropdown if card is already showing
-      var $groupSelect = $('#' + ID_PREFIX + 'group-id');
-      if ($groupSelect.length > 0) {
-        $groupSelect.empty();
-        for (var j = 0; j < availableGroups.length; j++) {
-          $groupSelect.append(
-            $('<option/>').val(availableGroups[j].id).text(availableGroups[j].name)
-          );
-        }
-        $groupSelect.val(currentGroupId);
-      }
     });
 
-    var card = TWTools.UI.createCard({
+    overviewCard = TWTools.UI.createCard({
       id: ID_PREFIX + 'main',
-      title: 'Troop Overview',
+      title: 'Village Overview',
       version: VERSION,
-      width: 750,
-      height: 520,
-      minWidth: 550,
-      minHeight: 300,
-      tabs: [
-        { id: 'troops', label: 'Troops' },
-        { id: 'commands', label: 'Commands' },
-        { id: 'settings', label: 'Settings' }
-      ],
+      width: 1000,
+      height: 580,
+      minWidth: 700,
+      minHeight: 360,
+      tabs: TABS,
       onTabChange: function(tabId) {
-        if (tabId === 'troops') {
-          renderTroops(card.getTabContent('troops'), troopData);
-        } else if (tabId === 'commands') {
-          renderCommands(card.getTabContent('commands'), commandData);
-        } else if (tabId === 'settings') {
-          renderSettings(card.getTabContent('settings'));
-        }
+        config = TWConfig.patch(localStore, { ui: { activeTab: tabId } });
+        activateTab(tabId);
       },
       onClose: function() {
-        TWTools.UI.toast('Troop Overview closed', 'success');
+        stopCountdown();
+        TWTools.UI.toast('Village Overview closed', 'success');
       }
     });
 
-    // Initial render — troops tab
-    var $troopsPanel = card.getTabContent('troops');
-
-    // Try to load cached all-views data
+    // Hydrate from cached troops (if present) into the master model so the first
+    // tab shows data without a fetch.
     var cachedAll = Store.getCache('troop_all_g' + currentGroupId);
     if (cachedAll && cachedAll.own_home) {
       allTroopData = cachedAll;
       troopData = allTroopData[currentViewType] || [];
-    }
-    var cachedTroops = troopData;
-    if (cachedTroops && cachedTroops.length > 0) {
-      // Recalculate nuke status with current settings
-      recalculateNukeStatus();
-      renderTroops($troopsPanel, troopData);
-      card.setStatus(troopData.length + ' villages loaded from cache.');
-    } else {
-      renderTroops($troopsPanel, []);
-      card.setStatus('Ready. Click "Fetch Troops" to load.');
+      domainData.troops = indexById(troopData);
+      try {
+        masterRows = OverviewCore.buildMasterModel({ troops: domainData.troops }, { byId: {} }, masterModelThresholds());
+      } catch (e) { masterRows = []; }
     }
 
-    // Settings tab — render immediately for lazy access
-    renderSettings(card.getTabContent('settings'));
+    // Render the initial (persisted) active tab lazily.
+    var initialTab = (config && config.ui && config.ui.activeTab) || 'dashboard';
+    var valid = false;
+    for (var ti = 0; ti < TABS.length; ti++) { if (TABS[ti].id === initialTab) { valid = true; break; } }
+    if (!valid) initialTab = 'dashboard';
+    activateTab(initialTab);
+    overviewCard.setStatus(masterRows.length
+      ? (masterRows.length + ' villages from cache. Click "Fetch All" to refresh.')
+      : 'Ready. Click "Fetch All" to build the unified model.');
+  }
 
+  /**
+   * Derive the world feature-gate flags (archer/church/watchtower/knight) from a
+   * loaded world config for COLUMN gating. Unknown -> undefined (column kept).
+   * @param {Object} cfg - World config.
+   * @returns {Object} Gate flags.
+   */
+  function gateFlagsFromWorldConfig(cfg) {
+    cfg = cfg || {};
+    var flags = {};
+    if (cfg.archer !== undefined) flags.archer = cfg.archer;
+    if (cfg.church !== undefined) flags.church = cfg.church;
+    if (cfg.watchtower !== undefined) flags.watchtower = cfg.watchtower;
+    if (cfg.knight !== undefined) flags.knight = cfg.knight;
+    if (cfg.game && cfg.game.archer !== undefined) flags.archer = cfg.game.archer;
+    if (cfg.game && cfg.game.church !== undefined) flags.church = cfg.game.church;
+    if (cfg.game && cfg.game.watchtower !== undefined) flags.watchtower = cfg.game.watchtower;
+    if (cfg.game && cfg.game.knight !== undefined) flags.knight = cfg.game.knight;
+    return flags;
   }
 
   // ============================================================
