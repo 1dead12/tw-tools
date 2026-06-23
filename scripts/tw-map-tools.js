@@ -152,15 +152,8 @@
     return null;
   }
 
-  /**
-   * Get the continent string (e.g. "K54") for coordinates.
-   * @param {number} x - X coordinate.
-   * @param {number} y - Y coordinate.
-   * @returns {string} Continent string.
-   */
-  function getContinent(x, y) {
-    return 'K' + Math.floor(y / 100) + '' + Math.floor(x / 100);
-  }
+  // getContinent is promoted into tw-core (canonical, Y-then-X). Call sites use
+  // TWTools.getContinent(x, y) directly.
 
   /**
    * Center the map on specific coordinates if on map page.
@@ -385,7 +378,7 @@
         for (var i = 0; i < barbs.length; i++) {
           var b = barbs[i];
           var dist = TWTools.distance(myCoords, {x: b.x, y: b.y});
-          var continent = getContinent(b.x, b.y);
+          var continent = TWTools.getContinent(b.x, b.y);
 
           // Apply filters
           if (b.points < Settings.barbMinPts || b.points > Settings.barbMaxPts) continue;
