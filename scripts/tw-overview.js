@@ -22,8 +22,12 @@
   if (!window.TWTools || !window.TWTools.UI) {
     throw new Error('tw-overview.js requires tw-core.js and tw-ui.js (window.TWTools.UI missing)');
   }
+  if (!window.TWTools.Config) {
+    throw new Error('tw-overview.js requires tw-config-core.js (window.TWTools.Config missing)');
+  }
 
   var TWTools = window.TWTools;
+  var TWConfig = TWTools.Config;
 
   // ============================================================
   // CONFIG & CONSTANTS
@@ -198,32 +202,78 @@
     }
   };
 
+  /**
+   * Store adapter for TWConfig — bound to the SAME prefixed Store path so the
+   * versioned config blob lands at the real twt_two_config key. TWConfig passes
+   * BARE keys ('config', 'settings', 'view_type', 'group_id'); this adapter (and
+   * ONLY this adapter) adds the two_/twt_ prefixes via Store/Storage. NEVER call
+   * TWTools.Storage.get('config') directly — that would miss the double prefix.
+   * @type {{get: function, set: function, remove: function}}
+   */
+  var localStore = {
+    get: function(key) { return Store.get(key, null); },
+    set: function(key, value) { Store.set(key, value); },
+    remove: function(key) { TWTools.Storage.remove(STORAGE_PREFIX + key); }
+  };
+
   // ============================================================
   // SETTINGS
   // ============================================================
 
-  /** @type {Object} Current settings */
+  /** @type {Object} Current settings (a flat shim over the versioned config blob) */
   var settings = {};
 
+  /** @type {?Object} The hydrated versioned config blob (twt_two_config). */
+  var config = null;
+
   /**
-   * Load settings from localStorage, merging with defaults.
+   * Load the versioned config via TWConfig (migrating the legacy flat two_* keys on
+   * first load), then project it onto the flat `settings` shim that the existing
+   * army-summary/unit-list/category-split code still reads.
    */
   function loadSettings() {
-    var saved = Store.get('settings', null);
-    settings = $.extend(true, {}, DEFAULT_SETTINGS, saved || {});
-
-    // Load persisted view type and group
-    var savedView = Store.get('view_type', 'own_home');
-    currentViewType = savedView || 'own_home';
-    var savedGroup = Store.get('group_id', '0');
-    currentGroupId = savedGroup || '0';
+    config = TWConfig.load(localStore);
+    settings = {
+      includeArchers: config.ui.includeArchers,
+      nukeThreshold: config.thresholds.nukeThreshold,
+      exportFormat: config.ui.exportFormat
+    };
+    currentViewType = config.ui.viewType || 'own_home';
+    currentGroupId = config.ui.groupId || '0';
   }
 
   /**
-   * Save current settings to localStorage.
+   * Persist the settings-form values into the versioned config (hydrate-first
+   * patch-merge — never clobbers sibling keys or the saved views).
    */
   function saveSettings() {
-    Store.set('settings', settings);
+    config = TWConfig.patch(localStore, {
+      ui: {
+        includeArchers: settings.includeArchers,
+        exportFormat: settings.exportFormat
+      },
+      thresholds: {
+        includeArchers: settings.includeArchers,
+        nukeThreshold: settings.nukeThreshold
+      }
+    });
+  }
+
+  /**
+   * The full threshold set fed into OverviewCore.buildMasterModel / computeDerivedFlags
+   * (isNuke / underDefended / whNearFull / isFull). Sourced from the versioned config
+   * with fail-safe fallbacks for an un-hydrated config.
+   * @returns {{nukeThreshold:number, includeArchers:boolean, defThreshold:number, warnPct:number, fullPct:number}}
+   */
+  function masterModelThresholds() {
+    var t = (config && config.thresholds) || {};
+    return {
+      nukeThreshold: (t.nukeThreshold !== undefined) ? t.nukeThreshold : settings.nukeThreshold,
+      includeArchers: (t.includeArchers !== undefined) ? t.includeArchers : settings.includeArchers,
+      defThreshold: (t.defThreshold !== undefined) ? t.defThreshold : 0,
+      warnPct: (t.whNearFullPct !== undefined) ? t.whNearFullPct : 90,
+      fullPct: (t.fullPct !== undefined) ? t.fullPct : 100
+    };
   }
 
   /**
@@ -870,10 +920,7 @@
         if (domainData[d]) join[d] = domainData[d];
       });
       try {
-        masterRows = OverviewCore.buildMasterModel(join, idx, {
-          nukeThreshold: settings.nukeThreshold,
-          includeArchers: settings.includeArchers
-        });
+        masterRows = OverviewCore.buildMasterModel(join, idx, masterModelThresholds());
       } catch (e) {
         masterRows = [];
       }
@@ -1327,7 +1374,7 @@
       // View change: just switch the bucket (no re-fetch needed — all views cached)
       $container.on('change.twoview', '#' + ID_PREFIX + 'view-type', function() {
         currentViewType = $(this).val();
-        Store.set('view_type', currentViewType);
+        config = TWConfig.patch(localStore, { ui: { viewType: currentViewType } });
         if (allTroopData[currentViewType]) {
           troopData = allTroopData[currentViewType];
           renderTroops($container, troopData);
@@ -1340,7 +1387,7 @@
       $container.on('change.twogroup', '#' + ID_PREFIX + 'group-id', function() {
         if (fetchLock) return; // Prevent concurrent fetches
         currentGroupId = $(this).val();
-        Store.set('group_id', currentGroupId);
+        config = TWConfig.patch(localStore, { ui: { groupId: currentGroupId } });
         allTroopData = {};
         troopData = [];
         fetchTroopDataWithUI($container, true);
