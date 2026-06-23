@@ -33,11 +33,46 @@
   var ID_PREFIX = 'two-';
   var STORAGE_PREFIX = 'two_';
 
-  /** Cache TTL for troop data (5 minutes) */
-  var CACHE_TTL = 5 * 60 * 1000;
+  var OverviewCore = TWTools.OverviewCore || {};
+
+  /**
+   * Per-domain cache TTLs (ms). Sourced from the pure lib so the orchestrator and
+   * the tests share ONE source of truth: incomings 2m / troops 5m / econ+buildings
+   * 15m / map 1h. config has NO TTL.
+   * @type {Object.<string, number>}
+   */
+  var CACHE_TTL_MS = (OverviewCore.CACHE_TTL_MS) || {
+    troops: 5 * 60 * 1000, econ: 15 * 60 * 1000, buildings: 15 * 60 * 1000,
+    incomings: 2 * 60 * 1000, map: 60 * 60 * 1000, config: null
+  };
+
+  /** Troop cache TTL alias (back-compat for fetchTroopData). */
+  var troopsTtl = CACHE_TTL_MS.troops;
 
   /** Minimum delay between AJAX requests to avoid rate limiting */
   var REQUEST_DELAY = 200;
+
+  /**
+   * Runtime-detected world key (NEVER hardcoded). Prefers game_data.world, then a
+   * sanitized location.host. Used to namespace per-domain caches across worlds/markets.
+   * @returns {string}
+   */
+  function detectWorldKey() {
+    try {
+      if (typeof game_data !== 'undefined' && game_data && game_data.world) {
+        return String(game_data.world).replace(/[^a-z0-9]/gi, '');
+      }
+    } catch (e) { /* game_data not present */ }
+    try {
+      if (typeof location !== 'undefined' && location.host) {
+        return String(location.host).replace(/[^a-z0-9]/gi, '');
+      }
+    } catch (e2) { /* no location */ }
+    return 'world';
+  }
+
+  /** @type {string} World key for cache namespacing. */
+  var currentWorldKey = detectWorldKey();
 
   /**
    * All unit types in standard TW display order.
@@ -281,8 +316,26 @@
   /** @type {CommandInfo[]} All fetched command data */
   var commandData = [];
 
-  /** @type {boolean} Whether a fetch is in progress */
-  var isFetching = false;
+  /**
+   * Single in-flight lock for ALL read-only fetches (troops + the Fetch-All domains).
+   * Replaces the old isFetching flag. Released in BOTH success AND error branches.
+   * @type {boolean}
+   */
+  var fetchLock = false;
+
+  /**
+   * Per-domain raw parsed data, keyed by domain ('troops','econ','buildings',
+   * 'incomings','map'). Each value is a {id: row} map or array consumed by
+   * OverviewCore.buildMasterModel.
+   * @type {Object.<string, (Object|Array)>}
+   */
+  var domainData = {};
+
+  /** @type {Array.<Object>} The unified per-village master model (JOIN of all domains). */
+  var masterRows = [];
+
+  /** @type {string|null} Premium-degrade note shown to the user (null when premium OK). */
+  var premiumNote = null;
 
   // ============================================================
   // DATA FETCHING — TROOPS
@@ -324,12 +377,12 @@
       return;
     }
 
-    if (isFetching) {
+    if (fetchLock) {
       TWTools.UI.toast('Fetch already in progress...', 'warning');
       return;
     }
 
-    isFetching = true;
+    fetchLock = true;
     if (statusCb) statusCb('Fetching troop overview (all views)...');
 
     // Always fetch type=complete — contains ALL 5 sub-rows per village
@@ -349,7 +402,7 @@
 
           // Handle empty group (no matching villages)
           if (result.emptyGroup) {
-            isFetching = false;
+            fetchLock = false;
             allTroopData = splitIntoCategories([]);
             allTroopData._emptyGroupMsg = result.emptyGroup;
             troopData = [];
@@ -367,15 +420,15 @@
             page++;
             setTimeout(fetchPage, REQUEST_DELAY);
           } else {
-            isFetching = false;
+            fetchLock = false;
             allTroopData = splitIntoCategories(allRows);
-            Store.setCache(cacheKey, allTroopData, CACHE_TTL);
+            Store.setCache(cacheKey, allTroopData, troopsTtl);
             troopData = allTroopData[currentViewType] || [];
             callback(troopData);
           }
         },
         error: function() {
-          isFetching = false;
+          fetchLock = false;
           if (statusCb) statusCb('Error fetching troop data.');
           callback([]);
         }
@@ -609,6 +662,272 @@
   }
 
   // ============================================================
+  // FETCH-ALL ORCHESTRATOR (sequential, single-lock, READ-ONLY)
+  // ============================================================
+  //
+  // A callback-chained sequential stepper (NOT Promise.all — the jQuery runtime has
+  // no async/await) that fetches each enabled domain behind ONE fetchLock with a
+  // >=200ms gap, parses via OverviewCore, caches per-domain under cacheKeyFor with
+  // the per-domain CACHE_TTL_MS, then JOINs everything via buildMasterModel. Every
+  // request is a READ-ONLY GET (overview_villages with a mode param, or a map .txt) —
+  // never a POST, never an auto-send.
+
+  /** Group URL fragment for the current group (empty for 'all'). */
+  function groupUrlParam() {
+    return (currentGroupId && currentGroupId !== '0') ? '&group=' + currentGroupId : '';
+  }
+
+  /**
+   * Detect Premium availability by probing mode=prod (READ-ONLY GET). Calls
+   * cb(detectResult) where detectResult = {available, reason?}. Never throws.
+   * @param {function(Object)} cb
+   */
+  function probePremium(cb) {
+    $.ajax({
+      url: '/game.php?screen=overview_villages&mode=prod' + groupUrlParam() + '&page=0',
+      dataType: 'html',
+      timeout: 15000,
+      success: function(html) {
+        cb(OverviewCore.detectPremium ? OverviewCore.detectPremium(html, 'prod') : { available: true });
+      },
+      error: function() {
+        cb({ available: false, reason: 'probe failed' });
+      }
+    });
+  }
+
+  /**
+   * Degrade economy to the open village's game_data (free, no AJAX) when Premium
+   * is unavailable. Fills domainData.econ for the current village only.
+   */
+  function degradeEconToGameData() {
+    domainData.econ = {};
+    try {
+      if (typeof game_data !== 'undefined' && game_data && game_data.village) {
+        var v = game_data.village;
+        var id = parseInt(v.id, 10) || 0;
+        if (id) {
+          domainData.econ[id] = {
+            id: id,
+            wood: parseInt(v.wood, 10) || 0,
+            clay: parseInt(v.stone, 10) || 0, // TW DOM quirk: stone == clay
+            iron: parseInt(v.iron, 10) || 0,
+            whCap: parseInt(v.storage_max, 10) || 0
+          };
+        }
+      }
+    } catch (e) { /* game_data absent — leave econ empty */ }
+    premiumNote = 'Premium unavailable: Economy/Buildings limited to the open village (game_data).';
+  }
+
+  /**
+   * Generic READ-ONLY overview-mode fetcher with per-domain caching. Paginates,
+   * parses via OverviewCore.parseOverviewTable, caches the result under cacheKeyFor,
+   * and calls done(rowsById). Releases the caller's responsibility for fetchLock
+   * (the orchestrator owns the lock across the whole run).
+   * @param {string} domain - Cache domain ('econ'|'buildings'|'incomings').
+   * @param {string} mode - overview_villages mode param (e.g. 'prod','buildings','incomings&subtype=attacks').
+   * @param {Object} cfg - OverviewCore.DOMAIN_CONFIGS.* parse config.
+   * @param {boolean} emitArray - true to keep an array (incomings), false for a {id:row} map.
+   * @param {function(string)} onProgress
+   * @param {function((Object|Array))} done
+   */
+  function fetchOverviewMode(domain, mode, cfg, emitArray, onProgress, done) {
+    var cacheKey = OverviewCore.cacheKeyFor(domain, currentGroupId, currentWorldKey);
+    var cached = Store.getCache(cacheKey);
+    if (cached) { done(cached); return; }
+
+    var ttl = CACHE_TTL_MS[domain] || troopsTtl;
+    var acc = [];
+    var page = 0;
+
+    function step() {
+      var url = '/game.php?screen=overview_villages&mode=' + mode + groupUrlParam() + '&page=' + page;
+      $.ajax({
+        url: url,
+        dataType: 'html',
+        timeout: 15000,
+        success: function(html) {
+          var matrix = OverviewCore.extractRowMatrix(html, $);
+          var parsed = OverviewCore.parseOverviewTable(matrix, cfg);
+          acc = acc.concat(parsed.rows || []);
+          if (onProgress) onProgress(domain + ': ' + acc.length + ' rows');
+          if (parsed.hasNextPage && page < 100) {
+            page++;
+            setTimeout(step, REQUEST_DELAY);
+          } else {
+            var result = emitArray ? acc : indexById(acc);
+            Store.setCache(cacheKey, result, ttl);
+            done(result);
+          }
+        },
+        error: function() {
+          // Fail-safe: emit what we have (cache only a non-empty partial).
+          var result = emitArray ? acc : indexById(acc);
+          if (acc.length) Store.setCache(cacheKey, result, ttl);
+          done(result);
+        }
+      });
+    }
+
+    step();
+  }
+
+  /** Index an array of rows by id into a {id: row} map. */
+  function indexById(rows) {
+    var map = {};
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i];
+      if (r && r.id !== undefined && r.id !== null) map[r.id] = r;
+    }
+    return map;
+  }
+
+  /**
+   * Fetch the map domain (villages + players) and build the village index. The
+   * index is also returned so buildMasterModel can JOIN identity/geo. READ-ONLY.
+   * @param {function(string)} onProgress
+   * @param {function(Object)} done - done(villageIndex {byId,byOwner,byContinent}).
+   */
+  function fetchMapDomain(onProgress, done) {
+    if (onProgress) onProgress('map: villages...');
+    TWTools.DataFetcher.fetchAllVillages(function(villages) {
+      TWTools.DataFetcher.fetchPlayers(function(players) {
+        var idx = TWTools.DataFetcher.buildVillageIndex(villages, players);
+        done(idx);
+      });
+    });
+  }
+
+  /**
+   * Per-domain fetcher table. Each fetcher(onProgress, done) writes into domainData
+   * and calls done(). Troops reuses the existing fetchTroopData spine (deduped
+   * via splitIntoCategories -> own_home bucket). The map fetcher additionally
+   * stashes the village index on domainData._villageIndex for the JOIN.
+   * @type {Object.<string, function(function(string), function())>}
+   */
+  var DOMAIN_FETCHERS = {
+    troops: function(onProgress, done) {
+      fetchTroopData(function(rows) {
+        domainData.troops = indexById(rows || []);
+        done();
+      }, onProgress);
+    },
+    econ: function(onProgress, done) {
+      fetchOverviewMode('econ', 'prod', OverviewCore.DOMAIN_CONFIGS.prod, false, onProgress, function(map) {
+        domainData.econ = map;
+        done();
+      });
+    },
+    buildings: function(onProgress, done) {
+      fetchOverviewMode('buildings', 'buildings', OverviewCore.DOMAIN_CONFIGS.buildings, false, onProgress, function(map) {
+        domainData.buildings = map;
+        done();
+      });
+    },
+    incomings: function(onProgress, done) {
+      fetchOverviewMode('incomings', 'incomings&subtype=attacks', OverviewCore.DOMAIN_CONFIGS.incomings, true, onProgress, function(arr) {
+        // M3: aggregate per target (placeholder). Stash both raw + aggregate.
+        domainData.incomings = OverviewCore.aggregateIncomingsByTarget(arr);
+        domainData._incomingsRaw = arr;
+        done();
+      });
+    },
+    map: function(onProgress, done) {
+      fetchMapDomain(onProgress, function(idx) {
+        domainData._villageIndex = idx;
+        done();
+      });
+    }
+  };
+
+  /**
+   * Sequential, single-lock, READ-ONLY Fetch-All across the enabled domains.
+   * Premium degrade: probe mode=prod first; if unavailable, fill econ from
+   * game_data current village + note, and SKIP the multi-village econ/buildings
+   * fetches. JOINs everything via buildMasterModel on completion. Releases the
+   * lock in BOTH the success and error paths.
+   *
+   * @param {Array.<string>} domains - Ordered domains to fetch (subset of DOMAIN_FETCHERS keys).
+   * @param {function(string)} [onProgress] - Status callback.
+   * @param {function(Array.<Object>)} [onDone] - Receives masterRows.
+   */
+  function runFetchAll(domains, onProgress, onDone) {
+    if (fetchLock) {
+      TWTools.UI.toast('Fetch already in progress...', 'warning');
+      return;
+    }
+    domains = (domains && domains.length) ? domains.slice() : ['troops', 'econ', 'buildings', 'incomings', 'map'];
+    fetchLock = true;
+    premiumNote = null;
+    domainData = {};
+
+    function finish() {
+      // Build the unified master model (identity/geo from the map index when present).
+      var idx = domainData._villageIndex || { byId: {} };
+      var join = {};
+      ['troops', 'econ', 'buildings', 'incomings', 'map'].forEach(function(d) {
+        if (domainData[d]) join[d] = domainData[d];
+      });
+      try {
+        masterRows = OverviewCore.buildMasterModel(join, idx, {
+          nukeThreshold: settings.nukeThreshold,
+          includeArchers: settings.includeArchers
+        });
+      } catch (e) {
+        masterRows = [];
+      }
+      fetchLock = false; // release on SUCCESS path
+      if (onDone) onDone(masterRows);
+    }
+
+    function runDomains(list) {
+      var i = 0;
+      function next() {
+        if (i >= list.length) { finish(); return; }
+        var dom = list[i];
+        var fetcher = DOMAIN_FETCHERS[dom];
+        i++;
+        if (!fetcher) { setTimeout(next, 0); return; }
+        try {
+          fetcher(onProgress, function() {
+            setTimeout(next, REQUEST_DELAY); // >=200ms gap between domains
+          });
+        } catch (e) {
+          fetchLock = false; // release on ERROR path
+          if (onProgress) onProgress('Error in ' + dom + ': ' + (e && e.message));
+          // Continue with remaining domains after the gap; re-acquire the lock.
+          fetchLock = true;
+          setTimeout(next, REQUEST_DELAY);
+        }
+      }
+      next();
+    }
+
+    // Premium feature-detect/degrade BEFORE the multi-village econ/buildings fetches.
+    var needsPremium = domains.indexOf('econ') !== -1 || domains.indexOf('buildings') !== -1;
+    if (!needsPremium) {
+      runDomains(domains);
+      return;
+    }
+
+    probePremium(function(detect) {
+      if (detect && detect.available) {
+        runDomains(domains);
+      } else {
+        // Degrade: fill econ from game_data, skip the multi-village econ/buildings fetches.
+        degradeEconToGameData();
+        if (onProgress) onProgress(premiumNote);
+        var filtered = [];
+        for (var k = 0; k < domains.length; k++) {
+          if (domains[k] !== 'econ' && domains[k] !== 'buildings') filtered.push(domains[k]);
+        }
+        runDomains(filtered);
+      }
+    });
+  }
+
+  // ============================================================
   // DATA FETCHING — COMMANDS
   // ============================================================
 
@@ -635,7 +954,7 @@
       success: function(html) {
         var commands = parseCommandsPage(html);
         commandData = commands;
-        Store.setCache('command_data', commands, CACHE_TTL);
+        Store.setCache('command_data', commands, troopsTtl);
         if (statusCb) statusCb('Loaded ' + commands.length + ' commands.');
         callback(commands);
       },
@@ -1019,7 +1338,7 @@
       });
       // Group change: must re-fetch (server-side filter)
       $container.on('change.twogroup', '#' + ID_PREFIX + 'group-id', function() {
-        if (isFetching) return; // Prevent concurrent fetches
+        if (fetchLock) return; // Prevent concurrent fetches
         currentGroupId = $(this).val();
         Store.set('group_id', currentGroupId);
         allTroopData = {};
@@ -1169,6 +1488,26 @@
       TWTools.Storage.remove(STORAGE_PREFIX + 'troop_all_g' + currentGroupId);
       allTroopData = {};
       troopData = [];
+
+      // Also refresh group list from game (dynamic groups may have changed)
+      TWTools.DataFetcher.fetchGroups(function(groups) {
+        availableGroups = groups;
+        var found = false;
+        for (var i = 0; i < groups.length; i++) {
+          if (groups[i].id === currentGroupId) { found = true; break; }
+        }
+        if (!found) currentGroupId = '0';
+        var $groupSelect = $panel.find('#' + ID_PREFIX + 'group-id');
+        if ($groupSelect.length > 0) {
+          $groupSelect.empty();
+          for (var j = 0; j < availableGroups.length; j++) {
+            $groupSelect.append(
+              $('<option/>').val(availableGroups[j].id).text(availableGroups[j].name)
+            );
+          }
+          $groupSelect.val(currentGroupId);
+        }
+      }, true); // forceRefresh = true
     }
 
     $panel.html('<div style="padding:8px;"><p style="color:#7a6840;">Fetching troop data...</p></div>');
@@ -1644,6 +1983,26 @@
     renderSettings(card.getTabContent('settings'));
 
   }
+
+  // ============================================================
+  // ORCHESTRATOR HANDLE (additive — the 8-tab UI consumes this in M6)
+  // ============================================================
+  //
+  // The Fetch-All spine is exposed without touching the existing tabs so M6 can
+  // drive the Dashboard/domain tabs from the unified master model. Reading these
+  // never triggers a fetch; the existing Troops/Commands/Settings flow is unchanged.
+
+  TWTools.OverviewOrchestrator = TWTools.OverviewOrchestrator || {
+    runFetchAll: runFetchAll,
+    getMasterRows: function() { return masterRows; },
+    getDomainData: function() { return domainData; },
+    getPremiumNote: function() { return premiumNote; },
+    getWorldKey: function() { return currentWorldKey; },
+    cacheKeyFor: function(domain) {
+      return OverviewCore.cacheKeyFor(domain, currentGroupId, currentWorldKey);
+    },
+    isFetching: function() { return fetchLock; }
+  };
 
   // ============================================================
   // AUTO-START
