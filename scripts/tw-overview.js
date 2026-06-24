@@ -233,12 +233,23 @@
    */
   function masterModelThresholds() {
     var t = (config && config.thresholds) || {};
+    var ui = (config && config.ui) || {};
     return {
       nukeThreshold: (t.nukeThreshold !== undefined) ? t.nukeThreshold : settings.nukeThreshold,
       includeArchers: (t.includeArchers !== undefined) ? t.includeArchers : settings.includeArchers,
       defThreshold: (t.defThreshold !== undefined) ? t.defThreshold : 0,
       warnPct: (t.whNearFullPct !== undefined) ? t.whNearFullPct : 90,
-      fullPct: (t.fullPct !== undefined) ? t.fullPct : 100
+      fullPct: (t.fullPct !== undefined) ? t.fullPct : 100,
+      // attack/defense tier classification (farm-space based).
+      targetNukePop: (t.targetNukePop !== undefined) ? t.targetNukePop : 20000,
+      greenFraction: (t.greenFraction !== undefined) ? t.greenFraction : 0.90,
+      orangeFraction: (t.orangeFraction !== undefined) ? t.orangeFraction : 0.40,
+      minRam: (t.minRam !== undefined) ? t.minRam : 200,
+      targetDefPop: (t.targetDefPop !== undefined) ? t.targetDefPop : 20000,
+      frontBand: (t.frontBand !== undefined) ? t.frontBand : 25,
+      colorPolarity: (ui.colorPolarity === 'A') ? 'A' : 'B',
+      // Real per-world pops (get_unit_info) when loaded; else core UNIT_POP defaults.
+      unitPops: loadedUnitPops || OverviewCore.UNIT_POP
     };
   }
 
@@ -1154,6 +1165,26 @@
     troopData = allTroopData[currentViewType] || troopData;
   }
 
+  /**
+   * Re-JOIN the unified master model from whatever domain data is in memory, using
+   * the CURRENT tier thresholds. Used after the Settings form changes a threshold so
+   * attackTier/defTier/etc. reclassify without a re-fetch. Fail-safe: keeps the prior
+   * masterRows on error.
+   */
+  function rebuildMasterModel() {
+    try {
+      var idx = (domainData && domainData._villageIndex) || { byId: {} };
+      var join = {};
+      ['troops', 'econ', 'buildings', 'incomings', 'map'].forEach(function(d) {
+        if (domainData && domainData[d]) join[d] = domainData[d];
+      });
+      // Fall back to the troops-only model when only cached troops exist.
+      if (!join.troops && domainData && domainData.troops) join.troops = domainData.troops;
+      if (Object.keys(join).length === 0) return;
+      masterRows = OverviewCore.buildMasterModel(join, idx, masterModelThresholds());
+    } catch (e) { /* keep prior masterRows */ }
+  }
+
   // ============================================================
   // UI — COMMANDS TAB (multi-sort, live countdown, export, ESTIMATE tags)
   // ============================================================
@@ -1389,6 +1420,32 @@
         '<input type="number" id="' + ID_PREFIX + 'set-front" value="' + (t.distFrontMax !== undefined ? t.distFrontMax : 25) +
           '" style="width:60px;font-size:10px;" min="1" max="200" step="1"></label></div>' +
 
+      // ---- attack / defense tier thresholds ----
+      '<div style="margin:8px 0 4px;font-weight:bold;color:#3e2e14;">Attack / Defense tiers</div>' +
+      '<div style="margin-bottom:6px;"><label>Target nuke pop (full nuke): ' +
+        '<input type="number" id="' + ID_PREFIX + 'set-nukepop" value="' + (t.targetNukePop !== undefined ? t.targetNukePop : 20000) +
+          '" style="width:70px;font-size:10px;" min="1000" max="50000" step="500"></label></div>' +
+      '<div style="margin-bottom:6px;"><label>Target def pop (full wall): ' +
+        '<input type="number" id="' + ID_PREFIX + 'set-defpop" value="' + (t.targetDefPop !== undefined ? t.targetDefPop : 20000) +
+          '" style="width:70px;font-size:10px;" min="1000" max="50000" step="500"></label></div>' +
+      '<div style="margin-bottom:6px;"><label>Full tier % (green/0.90): ' +
+        '<input type="number" id="' + ID_PREFIX + 'set-green" value="' + Math.round((t.greenFraction !== undefined ? t.greenFraction : 0.90) * 100) +
+          '" style="width:60px;font-size:10px;" min="50" max="100" step="5"></label></div>' +
+      '<div style="margin-bottom:6px;"><label>Partial tier % (orange/0.40): ' +
+        '<input type="number" id="' + ID_PREFIX + 'set-orange" value="' + Math.round((t.orangeFraction !== undefined ? t.orangeFraction : 0.40) * 100) +
+          '" style="width:60px;font-size:10px;" min="10" max="90" step="5"></label></div>' +
+      '<div style="margin-bottom:6px;"><label>Min rams for full nuke: ' +
+        '<input type="number" id="' + ID_PREFIX + 'set-minram" value="' + (t.minRam !== undefined ? t.minRam : 200) +
+          '" style="width:60px;font-size:10px;" min="0" max="2000" step="10"></label></div>' +
+      '<div style="margin-bottom:6px;"><label>Frontline band (fields): ' +
+        '<input type="number" id="' + ID_PREFIX + 'set-band" value="' + (t.frontBand !== undefined ? t.frontBand : 25) +
+          '" style="width:60px;font-size:10px;" min="1" max="200" step="1"></label></div>' +
+      '<div style="margin-bottom:6px;"><label>Tier colors: ' +
+        '<select id="' + ID_PREFIX + 'set-polarity" style="font-size:10px;">' +
+        '<option value="B"' + ((ui.colorPolarity || 'B') === 'B' ? ' selected' : '') + '>Full nuke = RED (B)</option>' +
+        '<option value="A"' + (ui.colorPolarity === 'A' ? ' selected' : '') + '>Full nuke = GREEN (A)</option>' +
+        '</select></label></div>' +
+
       '<div style="margin-bottom:6px;"><label>Export format: ' +
         '<select id="' + ID_PREFIX + 'set-export" style="font-size:10px;">' +
         '<option value="bbcode"' + (settings.exportFormat === 'bbcode' ? ' selected' : '') + '>BBCode</option>' +
@@ -1442,12 +1499,34 @@
       var whFull = TWConfig.clampInt(TWConfig.intOr($panel.find('#' + ID_PREFIX + 'set-whfull').val(), 90), 0, 100);
       var front = TWConfig.clampInt(TWConfig.intOr($panel.find('#' + ID_PREFIX + 'set-front').val(), 25), 1, 200);
       var theme = $panel.find('#' + ID_PREFIX + 'set-theme').val();
-      // NOTE: swapIfInverted hook reserved here for future min/max threshold pairs.
+
+      // ---- attack/defense tier thresholds (NaN-safe + clamps) ----
+      var nukePop = TWConfig.clampInt(TWConfig.intOr($panel.find('#' + ID_PREFIX + 'set-nukepop').val(), 20000), 1000, 50000);
+      var defPop = TWConfig.clampInt(TWConfig.intOr($panel.find('#' + ID_PREFIX + 'set-defpop').val(), 20000), 1000, 50000);
+      var greenPct = TWConfig.clampInt(TWConfig.intOr($panel.find('#' + ID_PREFIX + 'set-green').val(), 90), 10, 100);
+      var orangePct = TWConfig.clampInt(TWConfig.intOr($panel.find('#' + ID_PREFIX + 'set-orange').val(), 40), 5, 100);
+      // green (full) MUST be >= orange (partial); auto-swap an inverted pair.
+      var swapped = TWConfig.swapIfInverted(orangePct, greenPct); // [lo, hi]
+      orangePct = swapped[0];
+      greenPct = swapped[1];
+      var minRam = TWConfig.clampInt(TWConfig.intOr($panel.find('#' + ID_PREFIX + 'set-minram').val(), 200), 0, 2000);
+      var band = TWConfig.clampInt(TWConfig.intOr($panel.find('#' + ID_PREFIX + 'set-band').val(), 25), 1, 200);
+      var polarity = ($panel.find('#' + ID_PREFIX + 'set-polarity').val() === 'A') ? 'A' : 'B';
+
       config = TWConfig.patch(localStore, {
-        ui: { includeArchers: settings.includeArchers, exportFormat: settings.exportFormat, theme: theme },
-        thresholds: { nukeThreshold: settings.nukeThreshold, whNearFullPct: whFull, distFrontMax: front }
+        ui: { includeArchers: settings.includeArchers, exportFormat: settings.exportFormat, theme: theme, colorPolarity: polarity },
+        thresholds: {
+          nukeThreshold: settings.nukeThreshold, whNearFullPct: whFull, distFrontMax: front,
+          targetNukePop: nukePop, targetDefPop: defPop,
+          greenFraction: greenPct / 100, orangeFraction: orangePct / 100,
+          minRam: minRam, frontBand: band
+        }
       });
+      // Re-derive flags AND re-JOIN the master model with the new tier thresholds.
       recalculateNukeStatus();
+      rebuildMasterModel();
+      renderedTabs = {};
+      activateTab((config.ui && config.ui.activeTab) || 'dashboard');
       TWTools.UI.toast('Settings saved', 'success');
     });
 
@@ -1576,6 +1655,8 @@
   var worldConfigLoaded = false;
   var loadedWorldConfig = null;
   var loadedUnitSpeeds = null;
+  /** @type {?Object} Real per-world unit pops (get_unit_info); null -> UNIT_POP defaults. */
+  var loadedUnitPops = null;
 
   /**
    * Activate (and lazily render) a tab by id. Domain tabs render the master model;
@@ -1618,6 +1699,13 @@
           // Stash gating world flags onto config for column gating.
           config = TWConfig.patch(localStore, { world: gateFlagsFromWorldConfig(loadedWorldConfig) });
         });
+        // Fetch real per-world farm-space pops (fail-safe -> UNIT_POP defaults), so
+        // attack/defense tier classification uses the actual world economy.
+        if (typeof TWTools.DataFetcher.fetchUnitPops === 'function') {
+          TWTools.DataFetcher.fetchUnitPops(function(pops) {
+            loadedUnitPops = pops || null;
+          });
+        }
       });
     } catch (e) { /* world config optional — ESTIMATE simply stays ungated */ }
 

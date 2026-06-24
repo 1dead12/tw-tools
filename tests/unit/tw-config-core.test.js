@@ -19,6 +19,10 @@ global.window = {};
 require('../../lib/tw-config-core.js');
 var TWConfig = global.window.TWTools.Config;
 
+// cfgVersion 3 ships 10 seeded views (5 original + 5 curated tier presets).
+var CFG_VER = 3;
+var SEED_COUNT = TWConfig.SEED_VIEWS.length;
+
 function makeFakeStore(seed) {
   return {
     map: seed ? Object.assign({}, seed) : {},
@@ -34,7 +38,7 @@ function makeFakeStore(seed) {
 
 test('lib requires cleanly under node and exposes TWConfig', function () {
   assert.strictEqual(typeof TWConfig, 'object');
-  assert.strictEqual(TWConfig.CONFIG_VERSION, 2);
+  assert.strictEqual(TWConfig.CONFIG_VERSION, 3);
   assert.strictEqual(TWConfig.CONFIG_KEY, 'config'); // BARE — adapter adds prefixes
   ['mergeDefaults', 'deepMerge', 'migrateConfig', 'migrate_v1_to_v2',
     'seedViews', 'saveView', 'deleteView', 'renameView', 'applyView',
@@ -103,7 +107,7 @@ test('deepMerge: arrays REPLACED wholesale (never element-merged)', function () 
 
 test('mergeDefaults(null) deep-equals DEFAULT_CONFIG (cfgVersion=2)', function () {
   var out = TWConfig.mergeDefaults(null);
-  assert.strictEqual(out.cfgVersion, 2);
+  assert.strictEqual(out.cfgVersion, CFG_VER);
   assert.ok(Array.isArray(out.views));
   assert.ok(out.thresholds && typeof out.thresholds === 'object');
   assert.ok(out.ui && typeof out.ui === 'object');
@@ -113,7 +117,7 @@ test('mergeDefaults: spreads defaults under saved, stamps cfgVersion, keeps new 
   var out = TWConfig.mergeDefaults({ thresholds: { nukeThreshold: 7000 } });
   assert.strictEqual(out.thresholds.nukeThreshold, 7000);
   assert.strictEqual(out.thresholds.whNearFullPct, 90); // forward-compatible default
-  assert.strictEqual(out.cfgVersion, 2);
+  assert.strictEqual(out.cfgVersion, CFG_VER);
 });
 
 // ============================================================
@@ -122,22 +126,22 @@ test('mergeDefaults: spreads defaults under saved, stamps cfgVersion, keeps new 
 
 test('migrateConfig(null) -> valid v2, 5 seeded views', function () {
   var out = TWConfig.migrateConfig(null);
-  assert.strictEqual(out.cfgVersion, 2);
-  assert.strictEqual(out.views.length, 5);
+  assert.strictEqual(out.cfgVersion, CFG_VER);
+  assert.strictEqual(out.views.length, SEED_COUNT);
 });
 
 test('migrateConfig: garbage / bad cfgVersion never throws, returns valid v2', function () {
   var a = TWConfig.migrateConfig('garbage');
   var b = TWConfig.migrateConfig({ cfgVersion: 'x' });
-  assert.strictEqual(a.cfgVersion, 2);
-  assert.strictEqual(b.cfgVersion, 2);
-  assert.strictEqual(a.views.length, 5);
+  assert.strictEqual(a.cfgVersion, CFG_VER);
+  assert.strictEqual(b.cfgVersion, CFG_VER);
+  assert.strictEqual(a.views.length, SEED_COUNT);
 });
 
 test('migrateConfig: v2 config preserves user view and re-seeds to >=5', function () {
   var userView = { name: 'Mine', visibleColumns: ['name'], filters: [], sort: { key: 'name', dir: 'asc' }, group: '0' };
   var out = TWConfig.migrateConfig({ cfgVersion: 2, views: [userView] });
-  assert.strictEqual(out.cfgVersion, 2);
+  assert.strictEqual(out.cfgVersion, CFG_VER);
   assert.ok(out.views.length >= 5);
   assert.ok(out.views.some(function (v) { return v.name === 'Mine'; }));
 });
@@ -169,24 +173,24 @@ test('migrateConfig: full v1 path imports legacy keys end-to-end', function () {
     viewType: 'in_village',
     groupId: '7'
   });
-  assert.strictEqual(out.cfgVersion, 2);
+  assert.strictEqual(out.cfgVersion, CFG_VER);
   assert.strictEqual(out.ui.includeArchers, true);
   assert.strictEqual(out.ui.exportFormat, 'csv');
   assert.strictEqual(out.ui.viewType, 'in_village');
   assert.strictEqual(out.ui.groupId, '7');
   assert.strictEqual(out.thresholds.nukeThreshold, 6500);
-  assert.strictEqual(out.views.length, 5);
+  assert.strictEqual(out.views.length, SEED_COUNT);
 });
 
 // ============================================================
 // seeded presets
 // ============================================================
 
-test('seedViews: idempotent, length 5 from empty', function () {
+test('seedViews: idempotent, full seed count from empty', function () {
   var v = TWConfig.seedViews([]);
-  assert.strictEqual(v.length, 5);
+  assert.strictEqual(v.length, SEED_COUNT);
   var again = TWConfig.seedViews(v);
-  assert.strictEqual(again.length, 5);
+  assert.strictEqual(again.length, SEED_COUNT);
 });
 
 test('seedViews: a user view survives, an edited seed (same name) NOT overwritten', function () {
@@ -199,10 +203,38 @@ test('seedViews: a user view survives, an edited seed (same name) NOT overwritte
   assert.deepStrictEqual(fn[0].visibleColumns, ['name']); // user edit preserved
 });
 
-test('the 5 seeds reference real registry keys (names match design)', function () {
+test('the seeds reference real registry keys (names match design)', function () {
   var names = TWConfig.seedViews([]).map(function (v) { return v.name; }).sort();
   assert.deepStrictEqual(names,
-    ['Defense Gaps', 'Eco low-WH', 'Front Nukes', 'Frontline', 'Full-offense-ready']);
+    ['Defense Gaps', 'Defense needed', 'Eco low-WH', 'Economy overflow',
+      'Fakes available', 'Front Nukes', 'Frontline', 'Full-offense-ready',
+      'Noble-ready', 'Send-out wave']);
+});
+
+// The 5 curated v3 tier presets reference REAL COLUMN_REGISTRY keys.
+test('v3 curated presets reference real registry keys + tier filter op', function () {
+  var core = require('./helpers/load-overview-core.js');
+  var keys = {};
+  core.COLUMN_REGISTRY.forEach(function (c) { keys[c.key] = true; });
+  var seeds = TWConfig.seedViews([]);
+  var curated = ['Send-out wave', 'Defense needed', 'Economy overflow', 'Noble-ready', 'Fakes available'];
+  curated.forEach(function (name) {
+    var v = seeds.filter(function (s) { return s.name === name; })[0];
+    assert.ok(v, 'preset present: ' + name);
+    v.visibleColumns.forEach(function (k) {
+      assert.ok(keys[k], name + ' visibleColumn is a real registry key: ' + k);
+    });
+    // Filter keys are EITHER a registry column OR a derived flag attached by
+    // computeDerivedFlags (e.g. hasIncomings) that has no display column.
+    var DERIVED_FLAG_KEYS = { hasIncomings: true };
+    v.filters.forEach(function (f) {
+      assert.ok(keys[f.key] || DERIVED_FLAG_KEYS[f.key],
+        name + ' filter key is a registry key or derived flag: ' + f.key);
+    });
+  });
+  // Send-out wave uses the badge tier filter op.
+  var wave = seeds.filter(function (s) { return s.name === 'Send-out wave'; })[0];
+  assert.ok(wave.filters.some(function (f) { return f.key === 'attackTier' && f.op === 'tier' && f.value === 'full'; }));
 });
 
 // ============================================================
@@ -276,11 +308,11 @@ test('importViews: bad json / non-array returns config UNCHANGED', function () {
 test('load(empty store) returns stamped v2 AND persists it', function () {
   var store = makeFakeStore();
   var cfg = TWConfig.load(store);
-  assert.strictEqual(cfg.cfgVersion, 2);
-  assert.strictEqual(cfg.views.length, 5);
+  assert.strictEqual(cfg.cfgVersion, CFG_VER);
+  assert.strictEqual(cfg.views.length, SEED_COUNT);
   // persisted under the BARE config key (adapter would add prefixes for real)
   assert.ok(store.map.config, 'config not persisted');
-  assert.strictEqual(store.map.config.cfgVersion, 2);
+  assert.strictEqual(store.map.config.cfgVersion, CFG_VER);
 });
 
 test('load: only legacy keys present -> migrates them in', function () {
@@ -290,7 +322,7 @@ test('load: only legacy keys present -> migrates them in', function () {
     group_id: '9'
   });
   var cfg = TWConfig.load(store);
-  assert.strictEqual(cfg.cfgVersion, 2);
+  assert.strictEqual(cfg.cfgVersion, CFG_VER);
   assert.strictEqual(cfg.ui.includeArchers, true);
   assert.strictEqual(cfg.ui.exportFormat, 'csv');
   assert.strictEqual(cfg.ui.viewType, 'outside');
@@ -303,7 +335,7 @@ test('save: writes the config under the bare key, returns it', function () {
   var cfg = TWConfig.mergeDefaults(null);
   var out = TWConfig.save(store, cfg);
   assert.strictEqual(out, cfg);
-  assert.strictEqual(store.map.config.cfgVersion, 2);
+  assert.strictEqual(store.map.config.cfgVersion, CFG_VER);
 });
 
 test('patch: hydrate-first merge — two sequential patches preserve siblings', function () {
@@ -313,7 +345,7 @@ test('patch: hydrate-first merge — two sequential patches preserve siblings', 
   var after = TWConfig.patch(store, { thresholds: { nukeThreshold: 7777 } });
   assert.strictEqual(after.ui.includeArchers, true); // sibling preserved
   assert.strictEqual(after.thresholds.nukeThreshold, 7777);
-  assert.strictEqual(after.cfgVersion, 2);
+  assert.strictEqual(after.cfgVersion, CFG_VER);
   // and the store reflects it
   assert.strictEqual(store.map.config.ui.includeArchers, true);
   assert.strictEqual(store.map.config.thresholds.nukeThreshold, 7777);
@@ -323,7 +355,7 @@ test('patch: partial write never clobbers the views array', function () {
   var store = makeFakeStore();
   TWConfig.load(store);
   var after = TWConfig.patch(store, { ui: { groupId: '3' } });
-  assert.strictEqual(after.views.length, 5);
+  assert.strictEqual(after.views.length, SEED_COUNT);
 });
 
 // sort specs must be canonical multi-key ARRAYS so Table.applyMultiSort/OverviewCore.sortBy

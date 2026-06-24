@@ -327,3 +327,74 @@ test('computeVirtualWindow: exact fit / overscan never throws and stays in bound
   assert.ok(w.endIndex >= 10);
   assert.ok(w.endIndex <= 10);
 });
+
+// ============================================================
+// badgeCellModel + tier chips (badge columns)
+// ============================================================
+
+const BADGE_COL = {
+  key: 'attackTier', label: 'Atk tier', domain: 'troops',
+  render: 'badge', badge: true, tierChips: ['full', 'partial', 'empty'],
+  colorKeyField: 'attackTierColorKey', sortType: 'str'
+};
+
+test('badgeCellModel: reads tier object (icon + label + %) and colorKey', () => {
+  const row = {
+    attackTier: { tier: 'full', label: 'NUKE', icon: '⚔', colorKey: 'red', nukePercent: 95 }
+  };
+  const m = pure.badgeCellModel(row, BADGE_COL);
+  assert.strictEqual(m.tier, 'full');
+  assert.strictEqual(m.label, 'NUKE');
+  assert.strictEqual(m.colorKey, 'red');
+  assert.strictEqual(m.pct, 95);
+  assert.ok(m.text.indexOf('NUKE') !== -1);
+  assert.ok(m.text.indexOf('95%') !== -1);
+  assert.ok(m.text.indexOf('⚔') !== -1);
+});
+
+test('badgeCellModel: falls back to row[colorKeyField] when the object lacks colorKey', () => {
+  const row = {
+    attackTier: { tier: 'partial', label: 'PARTIAL', nukePercent: 50 },
+    attackTierColorKey: 'orange'
+  };
+  const m = pure.badgeCellModel(row, BADGE_COL);
+  assert.strictEqual(m.colorKey, 'orange');
+});
+
+test('badgeCellModel: defPercent used when nukePercent absent', () => {
+  const row = { defTier: { tier: 'empty', label: 'OPEN', colorKey: 'red', defPercent: 12 } };
+  const m = pure.badgeCellModel(row, { key: 'defTier', render: 'badge' });
+  assert.strictEqual(m.pct, 12);
+  assert.strictEqual(m.colorKey, 'red');
+});
+
+test('badgeCellModel: grey fallback colorKey, fail-safe on missing tier', () => {
+  const m = pure.badgeCellModel({}, BADGE_COL);
+  assert.strictEqual(m.colorKey, 'grey');
+  assert.strictEqual(m.text, '');
+});
+
+test('tier filter op: eq against nested tier value via applyFilters', () => {
+  const rows = [
+    { id: 1, attackTier: { tier: 'full' } },
+    { id: 2, attackTier: { tier: 'partial' } },
+    { id: 3, attackTier: { tier: 'empty' } },
+    { id: 4, attackTier: { tier: 'full' } }
+  ];
+  const out = pure.applyFilters(rows, [{ key: 'attackTier', op: 'tier', value: 'full' }]);
+  assert.deepStrictEqual(out.map((r) => r.id), [1, 4]);
+});
+
+test('computeFilterCounts: per-tier-chip counts match applyFilters', () => {
+  const rows = [
+    { attackTier: { tier: 'full' } },
+    { attackTier: { tier: 'full' } },
+    { attackTier: { tier: 'partial' } },
+    { attackTier: { tier: 'empty' } }
+  ];
+  const chips = BADGE_COL.tierChips.map((tv) => ({ key: 'attackTier', op: 'tier', value: tv }));
+  const counts = pure.computeFilterCounts(rows, chips);
+  assert.strictEqual(counts['attackTier|tier|full'], 2);
+  assert.strictEqual(counts['attackTier|tier|partial'], 1);
+  assert.strictEqual(counts['attackTier|tier|empty'], 1);
+});
