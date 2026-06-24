@@ -345,12 +345,9 @@
       return;
     }
 
-    if (fetchLock) {
-      TWTools.UI.toast('Fetch already in progress...', 'warning');
-      return;
-    }
-
-    fetchLock = true;
+    // NB: the fetchLock is owned EXCLUSIVELY by runFetchAll (the only caller).
+    // fetchTroopData must NOT guard on it or release it, or it would bail before
+    // calling back (stalling the domain stepper) / drop the lock mid-chain.
     if (statusCb) statusCb('Fetching troop overview (all views)...');
 
     // Always fetch type=complete — contains ALL 5 sub-rows per village
@@ -372,7 +369,6 @@
           // Empty group detection via the pure parser's emptyGroup signal.
           var probe = OverviewCore.parseOverviewTable(matrix, OverviewCore.DOMAIN_CONFIGS.units);
           if (probe.emptyGroup) {
-            fetchLock = false;
             allTroopData = OverviewCore.splitByCategory({ headers: [], rows: [] }, OverviewCore.DOMAIN_CONFIGS.units);
             allTroopData._emptyGroupMsg = probe.emptyGroup;
             troopData = [];
@@ -389,7 +385,6 @@
             page++;
             setTimeout(fetchPage, REQUEST_DELAY);
           } else {
-            fetchLock = false;
             // Merge all page matrices into one, then split into the 5 buckets (pure).
             var merged = { headers: matrices[0] ? matrices[0].headers : [], rows: [] };
             for (var p = 0; p < matrices.length; p++) {
@@ -407,7 +402,6 @@
           }
         },
         error: function() {
-          fetchLock = false;
           if (statusCb) statusCb('Error fetching troop data.');
           callback([]);
         }
@@ -456,6 +450,17 @@
    * @param {function(Object)} cb
    */
   function probePremium(cb) {
+    // Authoritative source: game_data knows whether Premium / Account Manager is active.
+    // (The HTML word-scan heuristic false-positives — the prod page still contains the
+    // word "Prémiový" in menus/upsell even when Premium IS active.)
+    var feat = (window.game_data && window.game_data.features) || {};
+    var premiumActive = !!(feat.Premium && feat.Premium.active);
+    var amActive = !!(feat.AccountManager && feat.AccountManager.active);
+    if (premiumActive || amActive) {
+      cb({ available: true, reason: 'game_data Premium/AM active' });
+      return;
+    }
+    // Fallback (e.g. sitter contexts where features may be absent): probe heuristically.
     $.ajax({
       url: '/game.php?screen=overview_villages&mode=prod' + groupUrlParam() + '&page=0',
       dataType: 'html',
