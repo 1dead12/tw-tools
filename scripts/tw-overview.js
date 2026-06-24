@@ -363,63 +363,39 @@
 
     // Always fetch type=complete — contains ALL 5 sub-rows per village
     var groupParam = (currentGroupId && currentGroupId !== '0') ? '&group=' + currentGroupId : '';
-    var matrices = [];
-    var page = 0;
-
-    function fetchPage() {
-      var url = '/game.php?screen=overview_villages&mode=units&type=complete' + groupParam + '&page=' + page;
-
-      $.ajax({
-        url: url,
-        dataType: 'html',
-        timeout: 15000,
-        success: function(html) {
-          // Delegate ALL parsing to the pure OverviewCore (DOM seam = extractRowMatrix).
-          var matrix = OverviewCore.extractRowMatrix(html, $);
-
-          // Empty group detection via the pure parser's emptyGroup signal.
-          var probe = OverviewCore.parseOverviewTable(matrix, OverviewCore.DOMAIN_CONFIGS.units);
-          if (probe.emptyGroup) {
-            allTroopData = OverviewCore.splitByCategory({ headers: [], rows: [] }, OverviewCore.DOMAIN_CONFIGS.units);
-            allTroopData._emptyGroupMsg = probe.emptyGroup;
-            troopData = [];
-            callback(troopData);
-            return;
-          }
-
-          matrices.push(matrix);
-          if (statusCb) {
-            statusCb('Loaded page ' + (page + 1) + ' (' + (matrix.rows ? Math.floor(matrix.rows.length / 5) : 0) + ' villages)...');
-          }
-
-          if (probe.hasNextPage && page < 100) {
-            page++;
-            setTimeout(fetchPage, REQUEST_DELAY);
-          } else {
-            // Merge all page matrices into one, then split into the 5 buckets (pure).
-            var merged = { headers: matrices[0] ? matrices[0].headers : [], rows: [] };
-            for (var p = 0; p < matrices.length; p++) {
-              if (matrices[p] && matrices[p].rows) merged.rows = merged.rows.concat(matrices[p].rows);
-            }
-            allTroopData = OverviewCore.splitByCategory(merged, OverviewCore.DOMAIN_CONFIGS.units);
-            // Compute derived isNuke/hasNoble flags across ALL 5 buckets.
-            OverviewCore.recomputeBucketsNuke(allTroopData, {
-              nukeThreshold: settings.nukeThreshold, includeArchers: settings.includeArchers
-            });
-            annotateBucketNobles(allTroopData);
-            Store.setCache(cacheKey, allTroopData, troopsTtl);
-            troopData = allTroopData[currentViewType] || [];
-            callback(troopData);
-          }
-        },
-        error: function() {
-          if (statusCb) statusCb('Error fetching troop data.');
-          callback([]);
+    // Single request: page=-1 returns ALL villages (every 5-row block) in ONE response,
+    // so there is no pagination loop (was page 0,1,2... each with a 200ms gap).
+    var url = '/game.php?screen=overview_villages&mode=units&type=complete' + groupParam + '&page=-1';
+    $.ajax({
+      url: url,
+      dataType: 'html',
+      timeout: 20000,
+      success: function(html) {
+        var matrix = OverviewCore.extractRowMatrix(html, $);
+        var probe = OverviewCore.parseOverviewTable(matrix, OverviewCore.DOMAIN_CONFIGS.units);
+        if (probe.emptyGroup) {
+          allTroopData = OverviewCore.splitByCategory({ headers: [], rows: [] }, OverviewCore.DOMAIN_CONFIGS.units);
+          allTroopData._emptyGroupMsg = probe.emptyGroup;
+          troopData = [];
+          callback(troopData);
+          return;
         }
-      });
-    }
-
-    fetchPage();
+        allTroopData = OverviewCore.splitByCategory(matrix, OverviewCore.DOMAIN_CONFIGS.units);
+        // Derived isNuke/hasNoble across ALL 5 buckets (pure).
+        OverviewCore.recomputeBucketsNuke(allTroopData, {
+          nukeThreshold: settings.nukeThreshold, includeArchers: settings.includeArchers
+        });
+        annotateBucketNobles(allTroopData);
+        Store.setCache(cacheKey, allTroopData, troopsTtl);
+        troopData = allTroopData[currentViewType] || [];
+        if (statusCb) statusCb('Troops: ' + (matrix.rows ? Math.floor(matrix.rows.length / 5) : 0) + ' villages');
+        callback(troopData);
+      },
+      error: function() {
+        if (statusCb) statusCb('Error fetching troop data.');
+        callback([]);
+      }
+    });
   }
 
   /**
@@ -527,39 +503,23 @@
     if (cached) { done(cached); return; }
 
     var ttl = CACHE_TTL_MS[domain] || troopsTtl;
-    var acc = [];
-    var page = 0;
-
-    function step() {
-      var url = '/game.php?screen=overview_villages&mode=' + mode + groupUrlParam() + '&page=' + page;
-      $.ajax({
-        url: url,
-        dataType: 'html',
-        timeout: 15000,
-        success: function(html) {
-          var matrix = OverviewCore.extractRowMatrix(html, $);
-          var parsed = OverviewCore.parseOverviewTable(matrix, cfg);
-          acc = acc.concat(parsed.rows || []);
-          if (onProgress) onProgress(domain + ': ' + acc.length + ' rows');
-          if (parsed.hasNextPage && page < 100) {
-            page++;
-            setTimeout(step, REQUEST_DELAY);
-          } else {
-            var result = emitArray ? acc : indexById(acc);
-            Store.setCache(cacheKey, result, ttl);
-            done(result);
-          }
-        },
-        error: function() {
-          // Fail-safe: emit what we have (cache only a non-empty partial).
-          var result = emitArray ? acc : indexById(acc);
-          if (acc.length) Store.setCache(cacheKey, result, ttl);
-          done(result);
-        }
-      });
-    }
-
-    step();
+    // page=-1 returns ALL villages in ONE response — no pagination loop.
+    $.ajax({
+      url: '/game.php?screen=overview_villages&mode=' + mode + groupUrlParam() + '&page=-1',
+      dataType: 'html',
+      timeout: 20000,
+      success: function(html) {
+        var parsed = OverviewCore.parseOverviewTable(OverviewCore.extractRowMatrix(html, $), cfg);
+        var rows = parsed.rows || [];
+        if (onProgress) onProgress(domain + ': ' + rows.length + ' rows');
+        var result = emitArray ? rows : indexById(rows);
+        Store.setCache(cacheKey, result, ttl);
+        done(result);
+      },
+      error: function() {
+        done(emitArray ? [] : {});
+      }
+    });
   }
 
   /**
@@ -707,8 +667,16 @@
     premiumNote = null;
     domainData = {};
 
-    function finish() {
-      // Build the unified master model (identity/geo from the map index when present).
+    // The whole-world map download (/map/*.txt) is a DIFFERENT endpoint than the
+    // overview pages (/game.php), so run it CONCURRENTLY with the sequential overview
+    // fetches instead of as a blocking 4th step. finish() waits for both to complete.
+    var wantMap = domains.indexOf('map') !== -1;
+    var seqDomains = domains.filter(function(d) { return d !== 'map'; });
+    var mapPending = wantMap;
+    var seqDone = false;
+
+    function tryFinish() {
+      if (!seqDone || mapPending) return;
       var idx = domainData._villageIndex || { byId: {} };
       var join = {};
       ['troops', 'econ', 'buildings', 'incomings', 'map'].forEach(function(d) {
@@ -719,52 +687,51 @@
       } catch (e) {
         masterRows = [];
       }
-      fetchLock = false; // release on SUCCESS path
+      fetchLock = false; // release once BOTH the overview chain and the map are done
       if (onDone) onDone(masterRows);
+    }
+
+    if (wantMap) {
+      try {
+        DOMAIN_FETCHERS.map(onProgress, function() { mapPending = false; tryFinish(); });
+      } catch (e) { mapPending = false; }
     }
 
     function runDomains(list) {
       var i = 0;
       function next() {
-        if (i >= list.length) { finish(); return; }
+        if (i >= list.length) { seqDone = true; tryFinish(); return; }
         var dom = list[i];
         var fetcher = DOMAIN_FETCHERS[dom];
         i++;
         if (!fetcher) { setTimeout(next, 0); return; }
         try {
           fetcher(onProgress, function() {
-            setTimeout(next, REQUEST_DELAY); // >=200ms gap between domains
+            setTimeout(next, REQUEST_DELAY); // >=200ms gap between same-endpoint overview fetches
           });
         } catch (e) {
-          fetchLock = false; // release on ERROR path
           if (onProgress) onProgress('Error in ' + dom + ': ' + (e && e.message));
-          // Continue with remaining domains after the gap; re-acquire the lock.
-          fetchLock = true;
-          setTimeout(next, REQUEST_DELAY);
+          setTimeout(next, REQUEST_DELAY); // skip this domain, continue (lock still held by runFetchAll)
         }
       }
       next();
     }
 
     // Premium feature-detect/degrade BEFORE the multi-village econ/buildings fetches.
-    var needsPremium = domains.indexOf('econ') !== -1 || domains.indexOf('buildings') !== -1;
+    var needsPremium = seqDomains.indexOf('econ') !== -1 || seqDomains.indexOf('buildings') !== -1;
     if (!needsPremium) {
-      runDomains(domains);
+      runDomains(seqDomains);
       return;
     }
 
     probePremium(function(detect) {
       if (detect && detect.available) {
-        runDomains(domains);
+        runDomains(seqDomains);
       } else {
         // Degrade: fill econ from game_data, skip the multi-village econ/buildings fetches.
         degradeEconToGameData();
         if (onProgress) onProgress(premiumNote);
-        var filtered = [];
-        for (var k = 0; k < domains.length; k++) {
-          if (domains[k] !== 'econ' && domains[k] !== 'buildings') filtered.push(domains[k]);
-        }
-        runDomains(filtered);
+        runDomains(seqDomains.filter(function(d) { return d !== 'econ' && d !== 'buildings'; }));
       }
     });
   }
