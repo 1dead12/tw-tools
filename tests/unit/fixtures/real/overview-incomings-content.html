@@ -1,0 +1,114 @@
+<!-- REAL premium capture sk104 — incomings content_value — account has 0 incomings (filter form only) -->
+<td id="content_value">
+                                            
+                                            
+<!--[if IE]><style type="text/css">
+table.vis.vis_menu {
+    border-collapse: collapse;
+    margin-top: -2px;
+    margin-left: -2px;
+    margin-right: -2px;
+
+    border-left: none;
+    border-right: none;
+    border-top: none;
+
+}
+
+table.main {
+    border-collapse: collapse;
+}
+
+.main td{
+    overflow: hidden;
+}
+
+</style><![endif]-->
+
+<script type="text/javascript">
+//<![CDATA[
+	if(window.opera) { $("#content_value").css("overflow", "hidden"); }
+	// This not bold thing is some kind of hack, because a tooltip contains a title and a body.
+	// If they are not splitted like the most tooltips everything is handeld as title and printed bold
+	// when using the bodyHandler function the title is removed, but i just return the normal tooltip text
+	// the non-bold class is just copyed from previous solutuon
+	$( function() { UI.ToolTip( $( '.village_note' ), { bodyHandler: function() { return this.tooltipText; }, extraClass: "tooltip-style not-bold" } ); } );
+//]]>
+</script>
+
+
+
+<input type="hidden" id="overview" value="incomings">
+<table class="vis modemenu" width="100%" id="overview_menu"><tbody><tr>
+	<td style="text-align:center"><a href="/game.php?village=4741&amp;screen=overview_villages&amp;mode=combined">Kombinované  </a></td>
+	<td style="text-align:center"><a href="/game.php?village=4741&amp;screen=overview_villages&amp;mode=prod">Produkcia </a></td>
+	<td style="text-align:center"><a href="/game.php?village=4741&amp;screen=overview_villages&amp;mode=trader">Transporty </a></td>
+	<td style="text-align:center"><a href="/game.php?village=4741&amp;screen=overview_villages&amp;mode=units">Vojenské jednotky </a></td>
+	<td style="text-align:center"><a href="/game.php?village=4741&amp;screen=overview_villages&amp;mode=commands">Príkazy </a></td>
+	<td style="text-align:center" class="selected"><a href="/game.php?village=4741&amp;screen=overview_villages&amp;mode=incomings">Príchod </a></td>
+	<td style="text-align:center"><a href="/game.php?village=4741&amp;screen=overview_villages&amp;mode=buildings">Budovy </a></td>
+	<td style="text-align:center"><a href="/game.php?village=4741&amp;screen=overview_villages&amp;mode=tech">Výskum </a></td>
+	<td style="text-align:center"><a href="/game.php?village=4741&amp;screen=overview_villages&amp;mode=groups">Skupiny </a></td>
+	<td style="text-align:center"><a href="/game.php?village=4741&amp;screen=overview_villages&amp;mode=am">Správca účtu </a></td>
+</tr></tbody></table><br>
+
+						
+
+			
+			<div id="paged_view_content">
+    	
+        <div class="vis_item" align="center">Skupiny: <a class="group-menu-item" data-group-id="7008" data-group-type="dynamic" href="/game.php?village=4741&amp;screen=overview_villages&amp;subtype=attacks&amp;mode=incomings&amp;group=7008">[Plný útok]</a>  <a class="group-menu-item" data-group-id="7009" data-group-type="dynamic" href="/game.php?village=4741&amp;screen=overview_villages&amp;subtype=attacks&amp;mode=incomings&amp;group=7009">[Prichádzajúci útok]</a>  <a class="group-menu-item" data-group-id="7010" data-group-type="dynamic" href="/game.php?village=4741&amp;screen=overview_villages&amp;subtype=attacks&amp;mode=incomings&amp;group=7010">[Má šľachtica]</a>  <strong class="group-menu-item" data-group-id="0" data-group-type="all">&gt;všetko&lt; </strong> </div><script>$(function() { VillageGroupMenu.Nav.init(); });</script>
+
+   		<table class="vis" width="100%">
+			   		</table>
+	
+	
+
+<script type="text/javascript">
+$(function(){
+	VillageGroups.initOverviews();
+});
+</script>
+
+
+<table class="vis modemenu" style="width:100%; margin-left:auto; margin-right:auto">
+<tbody><tr>
+	<td style="width:33%; text-align:center"><a href="/game.php?village=4741&amp;screen=overview_villages&amp;mode=incomings&amp;type=unignored&amp;subtype=all">Všetko</a></td>
+	<td style="width:33%; text-align:center" class="selected"><a href="/game.php?village=4741&amp;screen=overview_villages&amp;mode=incomings&amp;type=unignored&amp;subtype=attacks">Útoky</a></td>
+	<td style="width:33%; text-align:center"><a href="/game.php?village=4741&amp;screen=overview_villages&amp;mode=incomings&amp;type=unignored&amp;subtype=supports">Podpora</a></td>
+</tr>
+</tbody></table>
+<br>
+
+<div class="overview_filters" style="display: none; margin-bottom: 10px">
+    <form method="POST" action="/game.php?village=4741&amp;screen=overview_villages&amp;mode=incomings&amp;action=save_filters&amp;h=1c4bedd6">
+        <input type="hidden" name="return" value="/game.php?screen=overview_villages&amp;mode=incomings&amp;subtype=attacks">
+        <table class="vis">
+            <tbody><tr>
+                <th colspan="2">Filtrovať prichádzajúce príkazy</th>
+            </tr>
+                                            <tr>
+                    <td>Označenie príkazu:</td>
+                    <td>
+                        <input type="text" name="filters[target_comment]" value="">
+                                            </td>
+                </tr>
+                                            <tr>
+                    <td>Cieľová dedina:</td>
+                    <td>
+                        <input type="text" name="filters[target_name]" value="">
+                                            </td>
+                </tr>
+                                            <tr>
+                    <td>Pôvodná dedina:</td>
+                    <td>
+                        <input type="text" name="filters[origin_name]" value="">
+                                            </td>
+                </tr>
+                                            <tr>
+                    <td>Pôvodný hráč:</td>
+                    <td>
+                        <input type="text" name="filters[origin_player]" value="" class="autocomplete" data-type="player">
+                                            </td>
+                </tr>
+                                                <!-- will use non-standard input for command icons -

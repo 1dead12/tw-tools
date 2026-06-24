@@ -20,6 +20,16 @@ function readFixture(name) {
 }
 
 /**
+ * Read a REAL game-DOM fixture (genuine sk104 capture) from fixtures/real/.
+ * These are ground truth for the parser-hardening specs.
+ * @param {string} name - File name inside tests/unit/fixtures/real/.
+ * @returns {string} File contents.
+ */
+function readReal(name) {
+  return fs.readFileSync(path.join(__dirname, 'real', name), 'utf8');
+}
+
+/**
  * The fixtures the parser specs expect to exist.
  * Capture real ones from a logged-in Premium world (View-Source, NOT the DevTools DOM).
  * @type {string[]}
@@ -34,4 +44,23 @@ const EXPECTED_FIXTURES = [
   'ally.sample.txt'
 ];
 
-module.exports = { readFixture, EXPECTED_FIXTURES };
+/**
+ * The REAL fixtures (genuine sk104 capture, Premium active) used by the
+ * parser-hardening specs. Ground truth for column mapping / value parsing.
+ * @type {string[]}
+ */
+const REAL_FIXTURES = [
+  'overview-units-complete.html',
+  'overview-prod.html',
+  'overview-nonpremium.html',
+  'overview-buildings.html',
+  'overview-incomings-content.html',
+  'get_config.xml',
+  'get_unit_info.xml',
+  'get_building_info.xml',
+  'village.sample.txt',
+  'player.sample.txt',
+  'ally.sample.txt'
+];
+
+module.exports = { readFixture, readReal, EXPECTED_FIXTURES, REAL_FIXTURES };

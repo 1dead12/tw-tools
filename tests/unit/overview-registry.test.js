@@ -12,6 +12,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const core = require('./helpers/load-overview-core.js');
+const { readReal } = require('./fixtures/load.js');
 
 const DOMAINS = ['troops', 'economy', 'buildings', 'incomings', 'map'];
 
@@ -118,6 +119,38 @@ test('gateColumnsByWorld is fail-safe on a null world / null columns', () => {
   const gated = core.gateColumnsByWorld(core.COLUMN_REGISTRY, null);
   assert.ok(Array.isArray(gated) && gated.length === core.COLUMN_REGISTRY.length);
   assert.deepStrictEqual(core.gateColumnsByWorld(null, {}), []);
+});
+
+// ------------------------------------------------------------------
+// parseWorldConfigFlags + gating against the REAL get_config.xml (sk104):
+//   archer=0, church=0, watchtower=1, knight=3 (paladin) -> archer/marcher/church
+//   columns dropped; watchtower + knight (paladin) columns kept.
+// ------------------------------------------------------------------
+test('parseWorldConfigFlags reads archer/church/watchtower/knight from the real get_config.xml', () => {
+  const flags = core.parseWorldConfigFlags(readReal('get_config.xml'));
+  assert.strictEqual(flags.archer, 0);
+  assert.strictEqual(flags.church, 0);
+  assert.strictEqual(flags.watchtower, 1);
+  assert.strictEqual(flags.knight, 3);
+});
+
+test('parseWorldConfigFlags is fail-safe on empty / garbage XML', () => {
+  assert.deepStrictEqual(core.parseWorldConfigFlags(''), {});
+  assert.deepStrictEqual(core.parseWorldConfigFlags(null), {});
+  assert.deepStrictEqual(core.parseWorldConfigFlags('<config></config>'), {});
+});
+
+test('gateColumnsByWorld with the real world flags drops archer/marcher/church, keeps watchtower/knight', () => {
+  const flags = core.parseWorldConfigFlags(readReal('get_config.xml'));
+  const keys = core.gateColumnsByWorld(core.COLUMN_REGISTRY, flags).map((c) => c.key);
+  // archer=0 -> archer + marcher (both featureFlag:'archer') dropped.
+  assert.strictEqual(keys.indexOf('archer'), -1, 'archer column absent (archer=0)');
+  assert.strictEqual(keys.indexOf('marcher'), -1, 'marcher column absent (archer=0)');
+  // church=0 -> church dropped.
+  assert.strictEqual(keys.indexOf('church'), -1, 'church column absent (church=0)');
+  // watchtower=1, knight=3 -> kept.
+  assert.ok(keys.indexOf('watchtower') !== -1, 'watchtower column present (watchtower=1)');
+  assert.ok(keys.indexOf('knight') !== -1, 'paladin/knight column present (knight=3)');
 });
 
 // ------------------------------------------------------------------

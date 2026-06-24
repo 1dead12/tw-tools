@@ -9,11 +9,16 @@
  *
  * Shape:
  *   {
- *     headers:     [{ text, iconSrc, cssClass, colIndex }],
- *     rows:        [{ cells: [{ text, iconSrc, cssClass, links: [{ href, text }] }] }],
+ *     headers:     [{ text, iconSrc, cssClass, colIndex, order }],
+ *     rows:        [{ cells: [{ text, iconSrc, cssClass, links, colIndex, res } }] }],
  *     hasNextPage: boolean,
  *     infoBoxText: string
  *   }
+ *
+ *   header.order = the `order=` query param off the header's sort link (e.g. 'points',
+ *   'storage_max', 'trader_available', 'pop', 'name'). Language-proof column mapping.
+ *   cell.res = { wood, clay, iron } parsed from span.res.wood/.stone/.iron (stone->clay),
+ *   present only when such spans exist in the cell.
  *
  * This is a TEST HELPER only — it is intentionally regex-based and small. The browser
  * uses jQuery for the real DOM; this just has to be faithful to the column-mapping and
@@ -49,6 +54,59 @@ function parseLinks(html) {
 }
 
 /**
+ * Locale-tolerant integer parse (mirror of OverviewCore.parseLocaleNumber): strips
+ * whitespace (incl. NBSP) and '.'/',' thousands separators, keeps a leading '-'.
+ * @param {*} text
+ * @returns {number} 0 on failure.
+ */
+function parseLocaleNumber(text) {
+  if (text === null || text === undefined) return 0;
+  let s = String(text).replace(/[\s   ]/g, '').replace(/[.,]/g, '');
+  const neg = /^-/.test(s);
+  s = s.replace(/[^\d]/g, '');
+  if (!s) return 0;
+  const n = parseInt(s, 10);
+  if (isNaN(n)) return 0;
+  return neg ? -n : n;
+}
+
+/**
+ * Extract the `order=` query param from the first sort link inside a header cell.
+ * Language-proof column mapping (e.g. order=points, order=storage_max, order=name).
+ * @param {string} cellHtml - Inner HTML of a <th>.
+ * @returns {string} order token, or '' when absent.
+ */
+function headerOrder(cellHtml) {
+  // Tolerate raw-HTML entity encoding: href carries `&amp;order=` (char before is ';').
+  const m = String(cellHtml || '').match(/[?&;]order=([a-z_]+)/i);
+  return m ? m[1] : '';
+}
+
+/**
+ * Read resource spans (span.res.wood / .res.stone / .res.iron) out of a cell's HTML
+ * into { wood, clay, iron } numbers (stone -> clay). Returns null when no res span.
+ * @param {string} cellHtml - Inner HTML of a <td>.
+ * @returns {?{wood:number, clay:number, iron:number}}
+ */
+function parseResCell(cellHtml) {
+  const html = String(cellHtml || '');
+  if (!/class="[^"]*\bres\b/i.test(html)) return null;
+  const res = { wood: 0, clay: 0, iron: 0 };
+  const re = /<span[^>]*class="([^"]*\bres\b[^"]*)"[^>]*>([\s\S]*?)<\/span>/gi;
+  let m;
+  let found = false;
+  while ((m = re.exec(html))) {
+    const cls = m[1];
+    const val = parseLocaleNumber(stripTags(m[2]));
+    if (/\bwood\b/.test(cls)) { res.wood = val; found = true; }
+    else if (/\bstone\b/.test(cls)) { res.clay = val; found = true; } // stone -> clay
+    else if (/\bclay\b/.test(cls)) { res.clay = val; found = true; }
+    else if (/\biron\b/.test(cls)) { res.iron = val; found = true; }
+  }
+  return found ? res : null;
+}
+
+/**
  * Tokenize an HTML table fragment into a RowMatrix.
  * @param {string} html - Raw HTML (a full page or just a <table> fragment).
  * @returns {{headers: Array, rows: Array, hasNextPage: boolean, infoBoxText: string}}
@@ -77,19 +135,35 @@ function rowMatrix(html) {
       const openTag = '<t' + c[1] + c[2] + '>';
       const cellHtml = c[3];
       if (tagType === 'h') isHeaderRow = true;
-      cells.push({
+      const cell = {
         text: stripTags(cellHtml),
         iconSrc: firstImgSrc(cellHtml),
         cssClass: classOfTag(openTag),
-        links: parseLinks(cellHtml)
-      });
+        links: parseLinks(cellHtml),
+        order: headerOrder(cellHtml)
+      };
+      const res = parseResCell(cellHtml);
+      if (res) cell.res = res;
+      cells.push(cell);
     }
     if (isHeaderRow && headers.length === 0) {
       headers = cells.map(function (cell, i) {
-        return { text: cell.text, iconSrc: cell.iconSrc, cssClass: cell.cssClass, colIndex: i };
+        return {
+          text: cell.text,
+          iconSrc: cell.iconSrc,
+          cssClass: cell.cssClass,
+          colIndex: i,
+          order: cell.order || ''
+        };
       });
     } else if (cells.length) {
-      rows.push({ cells: cells });
+      // Re-index data cells with colIndex (parser reads cell.res, keeps fields intact).
+      rows.push({
+        cells: cells.map(function (cell, i) {
+          cell.colIndex = i;
+          return cell;
+        })
+      });
     }
   }
 
