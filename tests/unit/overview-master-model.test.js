@@ -208,3 +208,17 @@ test('buildMasterModel over REAL parser output computes isNuke/off/defPower from
   assert.ok(v1.off > 0, 'offensive power populated on the master row');
   assert.ok(v1.defPower > 0, 'defensive power populated on the master row');
 });
+
+// The village index is the WHOLE-WORLD map (thousands of villages). It must ENRICH the
+// player's villages (geo/rank), never emit a master row per world village.
+test('buildMasterModel enriches domain villages from the index but does NOT add world villages', () => {
+  const domainData = { econ: { 4741: { id: 4741, wood: 500 } } };
+  const villageIndex = { byId: {
+    4741: { id: 4741, x: 500, y: 500, rank: 12 }, // the player's village
+    1: { id: 1, x: 1, y: 1 }, 2: { id: 2, x: 2, y: 2 }, 3: { id: 3, x: 3, y: 3 } // world villages
+  } };
+  const rows = core.buildMasterModel(domainData, villageIndex);
+  assert.strictEqual(rows.length, 1, 'only the domain village, not the 3 world villages');
+  assert.strictEqual(rows[0].id, 4741);
+  assert.strictEqual(rows[0].rank, 12, 'enriched with rank from the world index');
+});
